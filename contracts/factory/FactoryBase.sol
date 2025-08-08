@@ -9,11 +9,11 @@ abstract contract FactoryBase is Ownable2Step {
 
     event DefaultRedeemFeeUpdated(uint256 bps);
 
-    constructor(address _owner, address _feeSink, uint256 _defaultRedeemFeeBps) {
+    constructor(address _owner, address _feeSink, uint256 _defaultRedeemFeeBps) Ownable2Step(_owner) {
         require(_feeSink != address(0), "feeSink=0");
         feeSink = _feeSink;
         defaultRedeemFeeBps = _defaultRedeemFeeBps;
-        _transferOwnership(_owner);
+        // owner set via Ownable2Step constructor
     }
 
     function setDefaultRedeemFeeBps(uint256 bps) external onlyOwner {
