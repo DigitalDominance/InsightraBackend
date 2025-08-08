@@ -17,9 +17,10 @@ contract CategoricalFactory is FactoryBase {
         IKasOracle oracle,
         bytes32 questionId,
         string calldata marketName,
-        uint8 numOutcomes
+        uint8 numOutcomes,
+        string[] calldata outcomeNames
     ) external onlyOwner returns (CategoricalMarket mkt) {
-        mkt = new CategoricalMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName, numOutcomes);
+        mkt = new CategoricalMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName, numOutcomes, outcomeNames);
         emit CategoricalCreated(address(mkt), questionId);
     }
 }
