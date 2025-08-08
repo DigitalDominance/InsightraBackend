@@ -13,11 +13,12 @@ const KASPA_URL = KASPA_TESTNET_RPC || RPC_URL || "https://rpc.kasplextest.xyz";
 module.exports = {
   solidity: {
     version: "0.8.24",
-    settings: { optimizer: { enabled: true, runs: 200 } },
+    settings: { optimizer: { enabled: true, runs: 200 },
+    viaIR: true },
   },
   defaultNetwork: "kaspaTestnet",
   networks: {
-    hardhat: {},
+    hardhat: { allowUnlimitedContractSize: true },
     kaspaTestnet: {
       url: KASPA_URL,
       chainId: 167012,
