@@ -1,6 +1,7 @@
-// server.js
+// Minimal HTTP server for Heroku with deploy trigger.
 const http = require('http');
 const url = require('url');
+const { spawn } = require('child_process');
 const PORT = process.env.PORT || 3000;
 
 function send(res, status, body, headers = {}) {
@@ -8,26 +9,53 @@ function send(res, status, body, headers = {}) {
   res.end(JSON.stringify(body));
 }
 
+function runDeployOnce(script = 'scripts/deploy.js') {
+  console.log('[DEPLOY] Launching child process:', script);
+  const child = spawn('node', [script], { env: process.env });
+  child.stdout.on('data', d => console.log('[DEPLOY OUT]', d.toString().trimEnd()));
+  child.stderr.on('data', d => console.error('[DEPLOY ERR]', d.toString().trimEnd()));
+  child.on('close', code => console.log('[DEPLOY] Child exited with code', code));
+  return child;
+}
+
+function requireAuth(req) {
+  const need = !!process.env.HEROKU_DEPLOY_TOKEN;
+  if (!need) return true;
+  const header = req.headers['authorization'] || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  return token && token === process.env.HEROKU_DEPLOY_TOKEN;
+}
+
 const server = http.createServer((req, res) => {
-  const { pathname } = url.parse(req.url, true);
-  if (pathname === '/' || pathname === '/health' || pathname === '/healthz') {
+  const { pathname, query } = url.parse(req.url, true);
+
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/health' || pathname === '/healthz')) {
     return send(res, 200, { ok: true, service: 'predikt-backend', time: new Date().toISOString() });
   }
-  if (pathname === '/env') {
-    const redact = (k) => ['PRIVATE_KEY', 'MNEMONIC', 'ALCHEMY_KEY', 'INFURA_KEY'].includes(k);
-    const env = Object.fromEntries(Object.entries(process.env).map(([k, v]) => [k, redact(k) ? '***' : v]));
+  if (req.method === 'GET' && pathname === '/env') {
+    const redact = (k) => ['PRIVATE_KEY','MNEMONIC','ALCHEMY_KEY','INFURA_KEY','HEROKU_DEPLOY_TOKEN'].includes(k);
+    const env = Object.fromEntries(Object.entries(process.env).map(([k,v]) => [k, redact(k) ? '***' : v]));
     return send(res, 200, { ok: true, env });
   }
-  if (pathname === '/version') {
+  if (req.method === 'GET' && pathname === '/version') {
     return send(res, 200, { name: process.env.npm_package_name || 'app', version: process.env.npm_package_version || '0.0.0' });
   }
-  send(res, 404, { ok: false, error: 'Not Found' });
+  if (req.method === 'POST' && pathname === '/deploy') {
+    if (!requireAuth(req)) return send(res, 401, { ok: false, error: 'Unauthorized' });
+    const script = (query && query.script) || 'scripts/deploy.js';
+    runDeployOnce(script);
+    return send(res, 202, { ok: true, msg: 'Deploy started', script });
+  }
+
+  return send(res, 404, { ok: false, error: 'Not Found' });
 });
 
 server.listen(PORT, () => {
   console.log(`[predikt] listening on :${PORT}`);
-
-  // 🚀 Run deploy script when the server starts
-  console.log("🚀 Starting deployment script on app startup...");
-  require('./scripts/deploy.js');
+  if (String(process.env.AUTO_DEPLOY_ON_START || 'true').toLowerCase() === 'true') {
+    console.log('🚀 Starting deployment script on app startup (non-blocking)...');
+    runDeployOnce('scripts/deploy.js');
+  } else {
+    console.log('AUTO_DEPLOY_ON_START is false — not deploying on boot.');
+  }
 });

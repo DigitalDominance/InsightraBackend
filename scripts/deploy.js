@@ -19,7 +19,7 @@ async function waitForQueue(provider, addr, maxWaitMs = 60000) {
   }
 }
 
-async function deployWithRetry(factory, params, label, provider, deployer, maxRetries = 5) {
+async function deployWithRetry(factory, params, label, provider, deployer, maxRetries = 8) {
   for (let i = 0; i <= maxRetries; i++) {
     try {
       await waitForQueue(provider, await deployer.getAddress(), 90000);
