@@ -1,33 +1,54 @@
-import { ethers } from "hardhat";
+// scripts/deploy.js
+require("dotenv").config();
+const hre = require("hardhat");
 
 async function main() {
-  console.log("🚀 Starting deployment of PredictionMarketFactory...");
+  // Optional toggle to avoid redeploying on every dyno restart
+  if (process.env.SKIP_DEPLOY === "true") {
+    console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment");
+    return;
+  }
 
-  const OWNER = process.env.OWNER || (await ethers.getSigners())[0].address;
-  console.log(`👤 Owner address: ${OWNER}`);
+  // Make sure artifacts exist (safe even if already compiled)
+  try {
+    await hre.run("compile");
+  } catch (e) {
+    console.warn("⚠️ compile step failed (continuing):", e?.message || e);
+  }
 
-  const FEE_SINK = process.env.FEE_SINK!;
-  console.log(`💰 Fee sink address: ${FEE_SINK || "(not provided)"}`);
+  const [deployer] = await hre.ethers.getSigners();
+  console.log("Deploying with:", deployer.address);
 
-  const REDEEM_FEE_BPS = Number(process.env.REDEEM_FEE_BPS || "100"); // 1% default
-  console.log(`📊 Redeem fee (BPS): ${REDEEM_FEE_BPS}`);
+  const balance = await hre.ethers.provider.getBalance(deployer.address);
+  console.log("Deployer balance (ETH):", hre.ethers.formatEther(balance));
 
-  if (!FEE_SINK) throw new Error("❌ FEE_SINK env is required");
+  const OWNER = process.env.OWNER || deployer.address;
+  const FEE_SINK = process.env.FEE_SINK;
+  const REDEEM_FEE_BPS = Number(process.env.REDEEM_FEE_BPS || "100"); // 1%
 
-  console.log("🔍 Getting contract factory for PredictionMarketFactory...");
-  const Factory = await ethers.getContractFactory("PredictionMarketFactory");
+  if (!FEE_SINK) throw new Error("FEE_SINK env is required");
 
-  console.log("📦 Deploying contract...");
+  console.log("OWNER:", OWNER);
+  console.log("FEE_SINK:", FEE_SINK);
+  console.log("REDEEM_FEE_BPS:", REDEEM_FEE_BPS);
+
+  const Factory = await hre.ethers.getContractFactory("PredictionMarketFactory");
+  console.log("PredictionMarketFactory interface loaded");
+
+  // Deploy (standard path)
   const factory = await Factory.deploy(OWNER, FEE_SINK, REDEEM_FEE_BPS);
+  console.log("Sent deploy tx:", factory.deploymentTransaction()?.hash);
 
-  console.log("⏳ Waiting for deployment to confirm...");
+  console.log("Waiting for deployment...");
   await factory.waitForDeployment();
 
-  const deployedAddress = await factory.getAddress();
-  console.log(`✅ PredictionMarketFactory deployed at: ${deployedAddress}`);
+  const addr = await factory.getAddress();
+  console.log("✅ PredictionMarketFactory deployed at:", addr);
 }
 
-main().catch((e) => {
-  console.error("❌ Deployment failed:", e);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("❌ Unhandled error:", err);
+    process.exit(1);
+  });
