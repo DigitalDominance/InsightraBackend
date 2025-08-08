@@ -1,0 +1,37 @@
+{
+  "name": "predikt-backend",
+  "description": "Minimal web process for Predikt smart-contract repo on Heroku",
+  "env": {
+    "NODE_ENV": {
+      "value": "production"
+    },
+    "RPC_URL": {
+      "required": false
+    },
+    "PRIVATE_KEY": {
+      "required": false
+    },
+    "OWNER": {
+      "required": false
+    },
+    "FEE_SINK": {
+      "required": false
+    },
+    "BOND_TOKEN": {
+      "required": false
+    },
+    "REDEEM_FEE_BPS": {
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "scripts": {
+    "postdeploy": "echo 'Predikt Heroku app created.'"
+  },
+  "addons": []
+}
