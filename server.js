@@ -52,7 +52,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[predikt] listening on :${PORT}`);
-  if (String(process.env.AUTO_DEPLOY_ON_START || 'true').toLowerCase() === 'true') {
+  if (String(process.env.AUTO_DEPLOY_ON_START || 'false').toLowerCase() === 'true') {
     console.log('🚀 Starting deployment script on app startup (non-blocking)...');
     runDeployOnce('scripts/deploy.js');
   } else {

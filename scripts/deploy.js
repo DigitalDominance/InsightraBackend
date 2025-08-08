@@ -19,7 +19,52 @@ async function waitForQueue(provider, addr, maxWaitMs = 60000) {
   }
 }
 
-async function deployWithRetry(factory, params, label, provider, deployer, maxRetries = 8) {
+async function deployWithRetry(factory, params, label, provider, deployer, maxRetries = 10) {
+  const baseGasPrice = (await provider.getGasPrice?.()) || null;
+  let gasPrice = baseGasPrice;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      await waitForQueue(provider, await deployer.getAddress(), 120000);
+
+      // bump gas price each retry (legacy type)
+      if (!gasPrice) {
+        gasPrice = (await provider.getGasPrice?.()) || 0n;
+      }
+      const bump = (BigInt(110 + i*15) * gasPrice) / 100n; // +10%, then +25%, etc.
+      const overrides = gasPrice ? { gasPrice: bump } : {};
+
+      // pre-estimate gas limit (best-effort)
+      try {
+        const tx = await factory.getDeployTransaction(...params, overrides);
+        const est = await provider.estimateGas(tx);
+        overrides.gasLimit = (est * 12n) // add 20%
+      } catch (e) {
+        // ignore estimation errors
+      }
+
+      console.log(`[GAS] ${label} gasPrice wei:`, overrides.gasPrice ? overrides.gasPrice.toString() : "auto");
+      console.log(`[GAS] ${label} gasLimit:`, overrides.gasLimit ? overrides.gasLimit.toString() : "auto");
+
+      console.log(`[DEPLOY] Sending ${label}...`);
+      const c = await factory.deploy(...params, overrides);
+      console.log(`[DEPLOY] ${label} tx:`, c.deploymentTransaction()?.hash);
+      await c.waitForDeployment();
+      const addr = await c.getAddress();
+      console.log(`✅ ${label}:`, addr);
+      return c;
+    } catch (err) {
+      const msg = (err && err.message) ? err.message : String(err);
+      const isQueue = /no available queue/i.test(msg);
+      console.error(`[DEPLOY ERROR] ${label}:`, msg);
+      if (!isQueue || i === maxRetries) throw err;
+      const backoff = Math.min(60000, 3000 * Math.pow(2, i)); // up to 60s
+      console.log(`[DEPLOY] Retrying ${label} in ${backoff}ms...`);
+      await sleep(backoff);
+      // bump gas for next loop
+      try { gasPrice = (await provider.getGasPrice?.()) || gasPrice; } catch {}
+    }
+  }
+}
   for (let i = 0; i <= maxRetries; i++) {
     try {
       await waitForQueue(provider, await deployer.getAddress(), 90000);
@@ -58,6 +103,8 @@ async function main() {
   }
 
   await hre.run("compile");
+  const net = await hre.ethers.provider.getNetwork();
+  console.log('Network:', Number(net.chainId), net.name || '');
 
   const [deployer] = await hre.ethers.getSigners();
   const provider = hre.ethers.provider;
