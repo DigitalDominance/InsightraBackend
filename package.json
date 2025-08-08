@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "license": "MIT",
+  "engines": { "node": ">=18.x" },
   "scripts": {
+    "start": "node server.js",
     "compile": "hardhat compile",
     "test": "hardhat test",
     "deploy": "hardhat run scripts/deploy.ts --network kasplex"
