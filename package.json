@@ -10,6 +10,9 @@
     "test": "hardhat test",
     "deploy": "hardhat run scripts/deploy.ts --network kasplex"
   },
+  "dependencies": {
+    "ethers": "^6.13.2"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "dotenv": "^16.4.5",
