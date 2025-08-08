@@ -29,5 +29,5 @@ server.listen(PORT, () => {
 
   // 🚀 Run deploy script when the server starts
   console.log("🚀 Starting deployment script on app startup...");
-  require('./scripts/deploy.ts');
+  require('./scripts/deploy.js');
 });

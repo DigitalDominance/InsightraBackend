@@ -5,6 +5,7 @@ import {IERC20} from "../libs/oz/IERC20.sol";
 import {SafeERC20} from "../libs/oz/SafeERC20.sol";
 import {MarketBase} from "./MarketBase.sol";
 import {OutcomeToken} from "./OutcomeToken.sol";
+import {IKasOracle} from "../interfaces/IKasOracle.sol";
 
 /// @notice Scalar market using LONG/SHORT pair; 1 collateral splits to 1 LONG + 1 SHORT
 /// Payout after resolution: LONG gets fraction f, SHORT gets (1-f), where

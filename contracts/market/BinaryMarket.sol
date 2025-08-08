@@ -5,6 +5,7 @@ import {IERC20} from "../libs/oz/IERC20.sol";
 import {SafeERC20} from "../libs/oz/SafeERC20.sol";
 import {MarketBase} from "./MarketBase.sol";
 import {OutcomeToken} from "./OutcomeToken.sol";
+import {IKasOracle} from "../interfaces/IKasOracle.sol";
 
 contract BinaryMarket is MarketBase {
     using SafeERC20 for IERC20;
