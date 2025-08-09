@@ -217,3 +217,14 @@ flowchart TD
     style M fill:#efe,stroke:#9f9,stroke-width:2px
     style R fill:#ffe,stroke:#cc9,stroke-width:2px
 ```
+
+<details>
+<summary><strong>Text fallback</strong> (for viewers that don't render Mermaid)</summary>
+
+User → (approve 100 BOND_TOKEN to Factory) → Factory
+User → (submit*) → Factory
+Factory → (transferFrom user→feeSink) → FeeSink
+Factory → deploy → New Market
+Factory → register → Registry (allMarkets[], isMarket, isRemoved)
+DAO/Owner → removeListing/restoreListing → Registry flags
+</details>
