@@ -104,6 +104,28 @@ async function main() {
     { name: "ScalarFactory", params: [OWNER, FEE_SINK, REDEEM_FEE_BPS] },
   ];
 
+  // Create a raw ethers Wallet using the deployer's private key. Hardhat's
+  // `Signer` implementation performs additional sanity checks on the
+  // transaction hash after broadcasting, which invokes
+  // `provider.getTransaction()` with the raw hash returned by the node. On
+  // kaspaTestnet, the node sometimes returns hashes without a `0x` prefix,
+  // causing Hardhat to throw a JSON unmarshalling error. By using a
+  // stand‑alone Wallet from ethers.js, we bypass those internal checks and
+  // simply broadcast the raw signed transaction. The private key is loaded
+  // from the environment via hardhat.config.js. If it is not defined, we
+  // fall back to the Hardhat deployer.
+  const pk = process.env.PRIVATE_KEY;
+  let wallet = null;
+  if (pk) {
+    wallet = new hre.ethers.Wallet(pk, provider);
+  } else {
+    // Use the deployer signer if no private key is provided. This should
+    // rarely happen because the Hardhat config enforces PRIVATE_KEY. We
+    // connect the default deployer to the provider so we can call
+    // wallet.sendTransaction() uniformly.
+    wallet = deployer;
+  }
+
   for (const { name, params } of deployments) {
     console.log(`\n── Deploying ${name} ──`);
     // Obtain the contract factory. This exposes the ABI and bytecode as
@@ -123,7 +145,7 @@ async function main() {
     // (rarely), Hardhat will throw and the catch below will surface the
     // error. Estimating helps prevent underestimating gas and having a
     // transaction revert due to out-of-gas.
-    const estimatedGas = await deployer.estimateGas(deployTx);
+    const estimatedGas = await wallet.estimateGas(deployTx);
     console.log(`[GAS] ${name} estimated gas:`, estimatedGas.toString());
 
     // Assign the gas limit on the transaction. You may optionally bump
@@ -137,7 +159,7 @@ async function main() {
     // to send a new transaction while one is unmined results in the
     // "no available queue" error. Waiting ensures the previous deployment
     // completes before proceeding.
-    await waitForQueue(provider, deployer.address, 120000);
+    await waitForQueue(provider, wallet.address, 120000);
 
     // Send the transaction with retry logic. If the provider returns
     // "no available queue", wait and retry up to a few times with
@@ -146,7 +168,7 @@ async function main() {
     const maxRetries = 5;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        txResponse = await deployer.sendTransaction(deployTx);
+        txResponse = await wallet.sendTransaction(deployTx);
         break;
       } catch (err) {
         const msg = (err && err.message) ? err.message : String(err);
@@ -166,10 +188,20 @@ async function main() {
     // Normalise the hash by ensuring it has a 0x prefix. Some custom
     // JSON-RPC providers omit this prefix, causing clients to reject
     // the hash as invalid. Adding it conditionally ensures universal
-    // compatibility.
+    // compatibility. We also update the hash property on the returned
+    // transaction response to avoid Hardhat/ethers from later using the
+    // non-prefixed value internally.
     let txHash = txResponse.hash;
     if (txHash && typeof txHash === 'string' && !txHash.startsWith('0x')) {
       txHash = '0x' + txHash;
+      try {
+        // Override the hash on the response object if possible. Some
+        // properties may be read-only, in which case assignment will
+        // silently fail. This protects against Hardhat's internal
+        // `checkTx()` fetching a transaction by the old hash and
+        // encountering an unmarshalling error.
+        txResponse.hash = txHash;
+      } catch {}
     }
     console.log(`[DEPLOY] ${name} tx:`, txHash);
 
