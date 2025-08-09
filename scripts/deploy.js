@@ -82,6 +82,47 @@ async function waitForQueue(addr, maxMs = 120000) {
   }
 }
 
+// Custom function to wait for transaction receipt with hash format handling
+async function waitForTransactionReceipt(provider, txHash, maxWaitTime = 300000) {
+  const start = Date.now()
+  console.log(`[DEPLOY] Waiting for transaction receipt: ${txHash}`)
+
+  while (Date.now() - start < maxWaitTime) {
+    try {
+      // Try with the hash as-is first
+      let receipt = await provider.getTransactionReceipt(txHash)
+      if (receipt) {
+        console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
+        return receipt
+      }
+
+      // If no receipt and hash doesn't start with 0x, try adding it
+      if (!txHash.startsWith("0x")) {
+        receipt = await provider.getTransactionReceipt(`0x${txHash}`)
+        if (receipt) {
+          console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
+          return receipt
+        }
+      }
+
+      // If hash starts with 0x, try without it
+      if (txHash.startsWith("0x")) {
+        receipt = await provider.getTransactionReceipt(txHash.slice(2))
+        if (receipt) {
+          console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
+          return receipt
+        }
+      }
+    } catch (err) {
+      console.warn(`[DEPLOY] Error getting receipt for ${txHash}:`, err.message)
+    }
+
+    await sleep(3000) // Wait 3 seconds before trying again
+  }
+
+  throw new Error(`Transaction receipt not found after ${maxWaitTime}ms for hash: ${txHash}`)
+}
+
 async function main() {
   if (process.env.SKIP_DEPLOY === "true") {
     console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment")
@@ -130,67 +171,62 @@ async function main() {
     )
 
     try {
-      // Prepare the deployment transaction
+      // Get the contract bytecode and constructor args
       const deployTx = await Factory.getDeployTransaction(...args)
-      console.log(`[DEPLOY] ${name} raw deploy TX:`, deployTx)
+      console.log(`[DEPLOY] ${name} deploy transaction prepared`)
 
       // Estimate gas
       const estimatedGas = await deployer.estimateGas(deployTx)
       console.log(`[DEPLOY] ${name} estimated gas:`, estimatedGas.toString())
 
-      // Set gas limit
-      deployTx.gasLimit = estimatedGas
+      // Get current nonce
+      const nonce = await hre.ethers.provider.getTransactionCount(deployer.address, "pending")
+      console.log(`[DEPLOY] ${name} nonce:`, nonce)
+
+      // Prepare transaction object manually
+      const txRequest = {
+        to: null, // deployment
+        data: deployTx.data,
+        gasLimit: estimatedGas,
+        nonce: nonce,
+        value: 0,
+      }
+
+      // Add fee data if available
+      try {
+        const feeData = await hre.ethers.provider.getFeeData()
+        if (feeData.gasPrice) {
+          txRequest.gasPrice = feeData.gasPrice
+        }
+        if (feeData.maxFeePerGas) {
+          txRequest.maxFeePerGas = feeData.maxFeePerGas
+        }
+        if (feeData.maxPriorityFeePerGas) {
+          txRequest.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
+        }
+      } catch (err) {
+        console.warn(`[DEPLOY] Could not get fee data:`, err.message)
+      }
 
       await waitForQueue(deployer.address)
 
-      // Send transaction with queue retries
-      const sentTx = await withQueueRetries(() => deployer.sendTransaction(deployTx), `${name} send`)
+      // Sign and send transaction manually to bypass Hardhat's checkTx
+      console.log(`[DEPLOY] ${name} signing transaction...`)
+      const signedTx = await deployer.signTransaction(txRequest)
+      console.log(`[DEPLOY] ${name} signed transaction length:`, signedTx.length)
 
-      console.log(`[DEPLOY] ${name} sent raw TX:`, sentTx.hash)
+      // Send raw transaction
+      const txHash = await withQueueRetries(async () => {
+        const hash = await hre.ethers.provider.send("eth_sendRawTransaction", [signedTx])
+        console.log(`[DEPLOY] ${name} raw transaction sent:`, hash)
+        return hash
+      }, `${name} send`)
 
-      // Wait for confirmation with custom error handling for the hex prefix issue
-      let receipt
-      try {
-        receipt = await sentTx.wait()
-      } catch (waitError) {
-        console.warn(`[DEPLOY] Error waiting for ${name} receipt:`, waitError.message)
-
-        // If it's the hex prefix error, try to get receipt manually
-        if (waitError.message.includes("cannot unmarshal hex string without 0x prefix")) {
-          console.log(`[DEPLOY] Attempting manual receipt lookup for ${name}...`)
-
-          // Wait a bit for the transaction to be mined
-          await sleep(5000)
-
-          // Try to get receipt directly with both hash formats
-          try {
-            const hash = sentTx.hash.startsWith("0x") ? sentTx.hash : `0x${sentTx.hash}`
-            receipt = await hre.ethers.provider.getTransactionReceipt(hash)
-
-            if (!receipt) {
-              // Try without 0x prefix
-              const hashWithoutPrefix = sentTx.hash.replace("0x", "")
-              receipt = await hre.ethers.provider.getTransactionReceipt(hashWithoutPrefix)
-            }
-
-            // If we still don't have a receipt, wait longer and try again
-            if (!receipt) {
-              console.log(`[DEPLOY] Waiting longer for ${name} to be mined...`)
-              await sleep(10000)
-              receipt = await hre.ethers.provider.getTransactionReceipt(hash)
-            }
-          } catch (receiptError) {
-            console.error(`[DEPLOY] Could not get receipt for ${name}:`, receiptError.message)
-            throw receiptError
-          }
-        } else {
-          throw waitError
-        }
-      }
-
-      if (!receipt) {
-        throw new Error(`[DEPLOY] No receipt found for ${name}`)
-      }
+      // Wait for receipt using our custom function
+      const receipt = await withQueueRetries(
+        () => waitForTransactionReceipt(hre.ethers.provider, txHash),
+        `${name} wait`,
+      )
 
       console.log(`[DEPLOY] ✅ ${name} deployed at:`, receipt.contractAddress)
       return receipt.contractAddress
