@@ -15,6 +15,12 @@ const isQueueErr = (e) => {
   return m.includes("no available queue") || m.includes("queue full") || m.includes("txpool is full")
 }
 
+// Ensure hash has 0x prefix
+const ensureHexPrefix = (hash) => {
+  if (!hash) return hash
+  return hash.startsWith("0x") ? hash : `0x${hash}`
+}
+
 async function withQueueRetries(fn, label) {
   const BASE = Number(process.env.RETRY_BASE_MS || 2500)
   const MAX = Number(process.env.RETRY_MAX_MS || 120000)
@@ -63,6 +69,43 @@ async function waitForQueue(addr, maxMs = 120000) {
   }
 }
 
+// Custom transaction receipt waiter that handles Kaspa's hash format
+async function waitForTransactionReceipt(txHash, maxWaitTime = 300000) {
+  const start = Date.now()
+  const normalizedHash = ensureHexPrefix(txHash)
+
+  console.log(`[DEPLOY] Waiting for transaction receipt: ${normalizedHash}`)
+
+  while (Date.now() - start < maxWaitTime) {
+    try {
+      const receipt = await E.provider.getTransactionReceipt(normalizedHash)
+      if (receipt) {
+        console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
+        return receipt
+      }
+    } catch (err) {
+      // If we get the hex prefix error, try without prefix
+      if (err.message.includes("cannot unmarshal hex string without 0x prefix")) {
+        try {
+          const receipt = await E.provider.getTransactionReceipt(txHash.replace("0x", ""))
+          if (receipt) {
+            console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
+            return receipt
+          }
+        } catch (err2) {
+          console.warn(`[DEPLOY] Error getting receipt (attempt 2):`, err2.message)
+        }
+      } else {
+        console.warn(`[DEPLOY] Error getting receipt:`, err.message)
+      }
+    }
+
+    await sleep(2000) // Wait 2 seconds before trying again
+  }
+
+  throw new Error(`Transaction receipt not found after ${maxWaitTime}ms`)
+}
+
 async function main() {
   if (process.env.SKIP_DEPLOY === "true") {
     console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment")
@@ -104,7 +147,7 @@ async function main() {
     const Factory = await E.getContractFactory(name)
 
     try {
-      // Use the simpler approach from the working script
+      // Prepare deployment transaction
       const deployTx = await Factory.getDeployTransaction(...args)
       console.log(`[DEPLOY] ${name} deploy transaction prepared`)
 
@@ -132,13 +175,18 @@ async function main() {
 
       await waitForQueue(deployer.address)
 
-      // Send with queue retries
-      const sentTx = await withQueueRetries(() => deployer.sendTransaction(deployTx), `${name} send`)
+      // Send transaction using provider directly to avoid Hardhat's checkTx
+      const sentTx = await withQueueRetries(async () => {
+        // Use provider.sendTransaction instead of deployer.sendTransaction
+        const response = await E.provider.sendTransaction(deployTx)
+        console.log(`[DEPLOY] ${name} raw response:`, response)
+        return response
+      }, `${name} send`)
 
-      console.log(`[DEPLOY] ${name} tx hash: ${sentTx.hash}`)
+      console.log(`[DEPLOY] ${name} tx hash: ${sentTx.hash || sentTx}`)
 
-      // Wait for confirmation - this is where the error was occurring
-      const receipt = await withQueueRetries(() => sentTx.wait(), `${name} wait`)
+      // Use our custom receipt waiter
+      const receipt = await withQueueRetries(() => waitForTransactionReceipt(sentTx.hash || sentTx), `${name} wait`)
 
       console.log(`[DEPLOY] ✅ ${name} deployed at: ${receipt.contractAddress}`)
       return receipt.contractAddress
