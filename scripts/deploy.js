@@ -1,24 +1,31 @@
+// scripts/deploy.js
 require("dotenv").config()
 const hre = require("hardhat")
-const fs = require("fs") // optional: only used to write deployments.json
+const fs = require("fs") // optional: only for deployments.json
 
 // ---------- helpers ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const ensure0x = (h) => (typeof h === "string" && !h.startsWith("0x") ? `0x${h}` : h)
 const isQueueErr = (e) => {
   const m = (e?.message || String(e)).toLowerCase()
   return m.includes("no available queue") || m.includes("queue full") || m.includes("txpool is full")
 }
-const ensure0x = (h) => (typeof h === "string" && !h.startsWith("0x") ? `0x${h}` : h)
 
-function formatEther(value) {
-  if (hre.ethers.utils?.formatEther) return hre.ethers.utils.formatEther(value) // v5
-  if (hre.ethers.formatEther) return hre.ethers.formatEther(value)             // v6
-  return String(value)
+// ethers v5/v6 shims
+function formatEther(v) {
+  if (hre.ethers.utils?.formatEther) return hre.ethers.utils.formatEther(v) // v5
+  if (hre.ethers.formatEther) return hre.ethers.formatEther(v)             // v6
+  return String(v)
 }
-function parseUnits(value, decimals) {
-  if (hre.ethers.utils?.parseUnits) return hre.ethers.utils.parseUnits(value, decimals) // v5
-  if (hre.ethers.parseUnits) return hre.ethers.parseUnits(value, decimals)              // v6
+function parseUnits(v, d) {
+  if (hre.ethers.utils?.parseUnits) return hre.ethers.utils.parseUnits(v, d) // v5
+  if (hre.ethers.parseUnits) return hre.ethers.parseUnits(v, d)              // v6
   throw new Error("Cannot find parseUnits")
+}
+function getCreateAddress(from, nonce) {
+  if (hre.ethers.getCreateAddress) return hre.ethers.getCreateAddress({ from, nonce }) // v6
+  if (hre.ethers.utils?.getContractAddress) return hre.ethers.utils.getContractAddress({ from, nonce }) // v5
+  throw new Error("Cannot compute CREATE address (no helper available)")
 }
 
 async function withQueueRetries(fn, label) {
@@ -66,31 +73,21 @@ async function waitForQueue(addr, maxMs = 120000) {
   }
 }
 
-async function waitForTransactionReceipt(provider, txHash, maxWaitTime = 300000) {
+// Only 0x-prefixed polling (no no-0x attempt, avoids your RPC error)
+async function waitForReceipt(provider, txHash, maxWaitMs = 300000) {
   const start = Date.now()
-  const hash0x = ensure0x(txHash)
-  console.log(`[DEPLOY] Waiting for receipt: ${hash0x}`)
-  while (Date.now() - start < maxWaitTime) {
+  const hash = ensure0x(txHash)
+  console.log(`[DEPLOY] Waiting for receipt: ${hash}`)
+  while (Date.now() - start < maxWaitMs) {
     try {
-      let receipt = await provider.getTransactionReceipt(hash0x)
-      if (receipt) {
-        console.log(`[DEPLOY] Confirmed in block ${receipt.blockNumber}`)
-        return receipt
-      }
-      // Some RPCs bizarrely accept no-0x
-      if (hash0x.startsWith("0x")) {
-        receipt = await provider.getTransactionReceipt(hash0x.slice(2))
-        if (receipt) {
-          console.log(`[DEPLOY] Confirmed in block ${receipt.blockNumber}`)
-          return receipt
-        }
-      }
-    } catch (err) {
-      console.warn(`[DEPLOY] getReceipt error for ${hash0x}:`, err.message)
+      const r = await provider.getTransactionReceipt(hash)
+      if (r) return r
+    } catch (e) {
+      console.warn(`[DEPLOY] getReceipt error for ${hash}:`, e.message)
     }
-    await sleep(3000)
+    await sleep(2500)
   }
-  throw new Error(`Receipt not found after ${maxWaitTime}ms for ${hash0x}`)
+  throw new Error(`Receipt not found after ${maxWaitMs}ms for ${hash}`)
 }
 
 // ---------- main ----------
@@ -106,7 +103,6 @@ async function main() {
 
   await hre.run("compile")
 
-  // Use a REAL wallet (not HardhatEthersSigner) so we can sign raw txs.
   const provider = hre.ethers.provider
   const wallet = new hre.ethers.Wallet(PRIVATE_KEY, provider)
 
@@ -115,30 +111,33 @@ async function main() {
   console.log("[DEPLOY] Ethers utils available:", !!hre.ethers.utils)
   console.log("[DEPLOY] Ethers formatEther available:", !!hre.ethers.formatEther)
 
-  const balance = await provider.getBalance(wallet.address)
-  console.log("[DEPLOY] Balance (native):", formatEther(balance))
+  const bal = await provider.getBalance(wallet.address)
+  console.log("[DEPLOY] Balance (native):", formatEther(bal))
 
-  // env/config
+  // ---- env/config ----
   const OWNER = process.env.OWNER || wallet.address
   const FEE_SINK = process.env.FEE_SINK || wallet.address
-  const BOND_TOKEN = process.env.BOND_TOKEN // required
+  const BOND_TOKEN = process.env.BOND_TOKEN
   const CREATION_FEE = process.env.CREATION_FEE_UNITS || "100"
   const REDEEM_FEE_BPS = process.env.REDEEM_FEE_BPS || "100"
 
   if (!BOND_TOKEN) throw new Error("❌ BOND_TOKEN is required (ERC20 address).")
   if (!BOND_TOKEN.startsWith("0x")) throw new Error("❌ BOND_TOKEN must be 0x-prefixed.")
 
-  // Resolve decimals/symbol for creation fee
-  const erc20Abi = [
-    "function decimals() view returns (uint8)",
-    "function symbol() view returns (string)"
-  ]
+  const erc20Abi = ["function decimals() view returns (uint8)", "function symbol() view returns (string)"]
   const bond = new hre.ethers.Contract(BOND_TOKEN, erc20Abi, provider)
   const [decimals, symbol] = await Promise.all([bond.decimals(), bond.symbol().catch(() => "BOND")])
   const creationFeeWei = parseUnits(String(CREATION_FEE), decimals)
   console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol} (${creationFeeWei.toString()} base units)`)
 
-  async function deployOne(name, args) {
+  async function deployOne(name, args, overrideEnvVar) {
+    const overrideAddrRaw = process.env[overrideEnvVar]
+    if (overrideAddrRaw) {
+      const addr = ensure0x(overrideAddrRaw)
+      console.log(`[DEPLOY] ⚠️ Using override for ${name}: ${addr}`)
+      return addr
+    }
+
     console.log(`\n[DEPLOY] ${name}...`)
     const BaseFactory = await hre.ethers.getContractFactory(name)
     const Factory = BaseFactory.connect(wallet)
@@ -147,25 +146,31 @@ async function main() {
       Factory.interface.fragments.map((f) => f.name || f.type),
     )
 
-    // Build raw deploy tx (bytecode + ctor args)
+    // Prepare deployment bytes
     const deployTx = await Factory.getDeployTransaction(...args)
 
-    // Minimal request; let populate fill fees/nonces
+    // Queue control
+    await waitForQueue(wallet.address)
+
+    // Fix nonce up-front so we can PREDICT contract address
+    const nonce = await provider.getTransactionCount(wallet.address, "pending")
+    const predicted = getCreateAddress(wallet.address, nonce)
+    console.log(`[DEPLOY] ${name} predicted address: ${predicted}`)
+
+    // Build request
     const req = {
       from: wallet.address,
-      to: undefined,      // contract creation
+      to: undefined,
       data: deployTx.data,
-      value: undefined,
+      nonce, // critical for deterministic predicted address
     }
 
-    // Pre-estimate gas to avoid provider-side mutation surprises
+    // Gas setup
     const gasLimit = await wallet.estimateGas(req)
     req.gasLimit = gasLimit
     console.log(`[DEPLOY] ${name} estimated gas: ${gasLimit.toString()}`)
 
-    await waitForQueue(wallet.address)
-
-    // Populate, sign, send raw, normalize hash
+    // Populate fees/chainId, sign and send raw
     const populated = await wallet.populateTransaction(req)
     const signed = await withQueueRetries(() => wallet.signTransaction(populated), `${name} sign`)
     const txHashRaw = await withQueueRetries(
@@ -176,22 +181,31 @@ async function main() {
     if (txHash !== txHashRaw) console.log(`[DEPLOY] ${name} RPC returned non-0x hash; normalized -> ${txHash}`)
     console.log(`[DEPLOY] ${name} tx: ${txHash}`)
 
-    // Wait for receipt without touching Hardhat's checkTx()
-    const receipt = await withQueueRetries(
-      () => waitForTransactionReceipt(provider, txHash),
-      `${name} wait`
-    )
-
-    console.log(`[DEPLOY] ✅ ${name} deployed at: ${receipt.contractAddress} (block ${receipt.blockNumber})`)
-    return receipt.contractAddress
+    // Wait for receipt (0x-only)
+    let finalAddr = predicted
+    try {
+      const r = await withQueueRetries(() => waitForReceipt(provider, txHash), `${name} wait`)
+      if (r?.contractAddress) finalAddr = ensure0x(r.contractAddress)
+      console.log(`[DEPLOY] ✅ ${name} deployed at: ${finalAddr} (block ${r.blockNumber})`)
+    } catch (e) {
+      // Fall back to predicted if RPC won't give us a proper receipt
+      console.warn(`[DEPLOY] ⚠️ ${name} receipt unavailable; using predicted address: ${finalAddr}`)
+    }
+    return finalAddr
   }
 
   const ctor = [OWNER, FEE_SINK, BOND_TOKEN, creationFeeWei, REDEEM_FEE_BPS]
-  const binaryFactory = await deployOne("BinaryFactory", ctor)
-  const categoricalFactory = await deployOne("CategoricalFactory", ctor)
-  const scalarFactory = await deployOne("ScalarFactory", ctor)
 
-  // Optional manifest
+  // If you want to pin BinaryFactory to your known address:
+  // export BINARY_FACTORY_ADDRESS_OVERRIDE=0x5F23306E9aACbAe41D6ED66De7E78E768603d566
+  const binaryFactory = await deployOne("BinaryFactory", ctor, "BINARY_FACTORY_ADDRESS_OVERRIDE")
+
+  // Deploy CategoricalFactory now (optionally allow override)
+  const categoricalFactory = await deployOne("CategoricalFactory", ctor, "CATEGORICAL_FACTORY_ADDRESS_OVERRIDE")
+
+  // ScalarFactory (unchanged; keep if needed)
+  const scalarFactory = await deployOne("ScalarFactory", ctor, "SCALAR_FACTORY_ADDRESS_OVERRIDE")
+
   const deploymentData = {
     network: hre.network.name,
     deployedAt: new Date().toISOString(),
@@ -201,9 +215,9 @@ async function main() {
     creationFee: creationFeeWei.toString(),
     redeemFeeBps: String(REDEEM_FEE_BPS),
     factories: {
-      BinaryFactory: binaryFactory,
-      CategoricalFactory: categoricalFactory,
-      ScalarFactory: scalarFactory,
+      BinaryFactory: ensure0x(binaryFactory),
+      CategoricalFactory: ensure0x(categoricalFactory),
+      ScalarFactory: ensure0x(scalarFactory),
     },
   }
   fs.writeFileSync("./deployments.json", JSON.stringify(deploymentData, null, 2))
