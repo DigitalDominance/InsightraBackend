@@ -183,8 +183,9 @@ async function main() {
       const nonce = await hre.ethers.provider.getTransactionCount(deployer.address, "pending")
       console.log(`[DEPLOY] ${name} nonce:`, nonce)
 
-      // Prepare transaction object manually
+      // Prepare transaction object manually - use provider.sendTransaction directly
       const txRequest = {
+        from: deployer.address,
         to: null, // deployment
         data: deployTx.data,
         gasLimit: estimatedGas,
@@ -210,15 +211,12 @@ async function main() {
 
       await waitForQueue(deployer.address)
 
-      // Sign and send transaction manually to bypass Hardhat's checkTx
-      console.log(`[DEPLOY] ${name} signing transaction...`)
-      const signedTx = await deployer.signTransaction(txRequest)
-      console.log(`[DEPLOY] ${name} signed transaction length:`, signedTx.length)
-
-      // Send raw transaction
+      // Send transaction using provider.send directly to bypass Hardhat's transaction handling
+      console.log(`[DEPLOY] ${name} sending transaction via provider...`)
       const txHash = await withQueueRetries(async () => {
-        const hash = await hre.ethers.provider.send("eth_sendRawTransaction", [signedTx])
-        console.log(`[DEPLOY] ${name} raw transaction sent:`, hash)
+        // Use eth_sendTransaction instead of sendTransaction to avoid Hardhat's wrapper
+        const hash = await hre.ethers.provider.send("eth_sendTransaction", [txRequest])
+        console.log(`[DEPLOY] ${name} transaction sent:`, hash)
         return hash
       }, `${name} send`)
 
