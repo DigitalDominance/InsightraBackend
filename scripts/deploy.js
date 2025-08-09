@@ -9,39 +9,33 @@ const isQueueErr = (e) => {
   return m.includes("no available queue") || m.includes("queue full") || m.includes("txpool is full")
 }
 
-// Helper to handle ethers v5/v6 differences
+// ethers v5/v6 shims
 function formatEther(value) {
   if (hre.ethers.utils && hre.ethers.utils.formatEther) {
-    // ethers v5
+    // v5
     return hre.ethers.utils.formatEther(value)
   } else if (hre.ethers.formatEther) {
-    // ethers v6
+    // v6
     return hre.ethers.formatEther(value)
-  } else {
-    // fallback - just show the raw value
-    return value.toString()
   }
+  return value.toString()
 }
-
 function parseUnits(value, decimals) {
   if (hre.ethers.utils && hre.ethers.utils.parseUnits) {
-    // ethers v5
+    // v5
     return hre.ethers.utils.parseUnits(value, decimals)
   } else if (hre.ethers.parseUnits) {
-    // ethers v6
+    // v6
     return hre.ethers.parseUnits(value, decimals)
-  } else {
-    throw new Error("Cannot find parseUnits function")
   }
+  throw new Error("Cannot find parseUnits function")
 }
 
 async function withQueueRetries(fn, label) {
   const BASE = Number(process.env.RETRY_BASE_MS || 2500)
   const MAX = Number(process.env.RETRY_MAX_MS || 120000)
   const FACT = Number(process.env.RETRY_FACTOR || 1.7)
-  let i = 0,
-    lastLog = 0
-
+  let i = 0, lastLog = 0
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
@@ -82,47 +76,6 @@ async function waitForQueue(addr, maxMs = 120000) {
   }
 }
 
-// Custom function to wait for transaction receipt with hash format handling
-async function waitForTransactionReceipt(provider, txHash, maxWaitTime = 300000) {
-  const start = Date.now()
-  console.log(`[DEPLOY] Waiting for transaction receipt: ${txHash}`)
-
-  while (Date.now() - start < maxWaitTime) {
-    try {
-      // Try with the hash as-is first
-      let receipt = await provider.getTransactionReceipt(txHash)
-      if (receipt) {
-        console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
-        return receipt
-      }
-
-      // If no receipt and hash doesn't start with 0x, try adding it
-      if (!txHash.startsWith("0x")) {
-        receipt = await provider.getTransactionReceipt(`0x${txHash}`)
-        if (receipt) {
-          console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
-          return receipt
-        }
-      }
-
-      // If hash starts with 0x, try without it
-      if (txHash.startsWith("0x")) {
-        receipt = await provider.getTransactionReceipt(txHash.slice(2))
-        if (receipt) {
-          console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
-          return receipt
-        }
-      }
-    } catch (err) {
-      console.warn(`[DEPLOY] Error getting receipt for ${txHash}:`, err.message)
-    }
-
-    await sleep(3000) // Wait 3 seconds before trying again
-  }
-
-  throw new Error(`Transaction receipt not found after ${maxWaitTime}ms for hash: ${txHash}`)
-}
-
 async function main() {
   if (process.env.SKIP_DEPLOY === "true") {
     console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment")
@@ -139,7 +92,6 @@ async function main() {
   console.log("[DEPLOY] Ethers utils available:", !!hre.ethers.utils)
   console.log("[DEPLOY] Ethers formatEther available:", !!hre.ethers.formatEther)
 
-  // Fetch and print balance
   const balance = await hre.ethers.provider.getBalance(deployer.address)
   console.log("[DEPLOY] Balance (native):", formatEther(balance))
 
@@ -147,87 +99,62 @@ async function main() {
   const OWNER = process.env.OWNER || deployer.address
   const FEE_SINK = process.env.FEE_SINK || deployer.address
   const BOND_TOKEN = process.env.BOND_TOKEN // required
-  const CREATION_FEE = process.env.CREATION_FEE_UNITS || "100" // human units (e.g. "100")
+  const CREATION_FEE = process.env.CREATION_FEE_UNITS || "100" // human units
   const REDEEM_FEE_BPS = process.env.REDEEM_FEE_BPS || "100" // default 1%
 
   if (!BOND_TOKEN) throw new Error("❌ BOND_TOKEN is required (ERC20 address).")
+  if (!BOND_TOKEN.startsWith("0x")) throw new Error("❌ BOND_TOKEN must be a 0x-prefixed address.")
 
   // resolve decimals/symbol so "100" => 100.0 tokens
-  const erc20Abi = ["function decimals() view returns (uint8)", "function symbol() view returns (string)"]
-
+  const erc20Abi = [
+    "function decimals() view returns (uint8)",
+    "function symbol() view returns (string)"
+  ]
   const bond = new hre.ethers.Contract(BOND_TOKEN, erc20Abi, hre.ethers.provider)
   const [decimals, symbol] = await Promise.all([bond.decimals(), bond.symbol().catch(() => "BOND")])
 
   const creationFeeWei = parseUnits(String(CREATION_FEE), decimals)
   console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol} (${creationFeeWei.toString()} base units)`)
 
+  const isV6 = !!hre.ethers.formatEther // crude but reliable
+
   async function deployOne(name, args) {
     console.log(`\n[DEPLOY] ${name}...`)
     const Factory = await hre.ethers.getContractFactory(name)
-
     console.log(
       `[DEPLOY] ${name} interface loaded:`,
       Factory.interface.fragments.map((f) => f.name || f.type),
     )
 
+    await waitForQueue(deployer.address)
+
     try {
-      // Get the contract bytecode and constructor args
-      const deployTx = await Factory.getDeployTransaction(...args)
-      console.log(`[DEPLOY] ${name} deploy transaction prepared`)
+      // Standard ethers deploy path -> signs locally -> eth_sendRawTransaction
+      const contract = await withQueueRetries(() => Factory.deploy(...args), `${name} deploy`)
 
-      // Estimate gas
-      const estimatedGas = await deployer.estimateGas(deployTx)
-      console.log(`[DEPLOY] ${name} estimated gas:`, estimatedGas.toString())
-
-      // Get current nonce
-      const nonce = await hre.ethers.provider.getTransactionCount(deployer.address, "pending")
-      console.log(`[DEPLOY] ${name} nonce:`, nonce)
-
-      // Prepare transaction object manually - use provider.sendTransaction directly
-      const txRequest = {
-        from: deployer.address,
-        to: null, // deployment
-        data: deployTx.data,
-        gasLimit: estimatedGas,
-        nonce: nonce,
-        value: 0,
+      // Get tx hash in both ethers versions
+      let txResponse
+      if (isV6) {
+        txResponse = contract.deploymentTransaction()
+      } else {
+        txResponse = contract.deployTransaction
       }
+      const txHash = txResponse?.hash
+      if (txHash) console.log(`[DEPLOY] ${name} tx: ${txHash}`)
 
-      // Add fee data if available
-      try {
-        const feeData = await hre.ethers.provider.getFeeData()
-        if (feeData.gasPrice) {
-          txRequest.gasPrice = feeData.gasPrice
-        }
-        if (feeData.maxFeePerGas) {
-          txRequest.maxFeePerGas = feeData.maxFeePerGas
-        }
-        if (feeData.maxPriorityFeePerGas) {
-          txRequest.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
-        }
-      } catch (err) {
-        console.warn(`[DEPLOY] Could not get fee data:`, err.message)
+      // Wait for deployment/confirmation and receipt
+      if (isV6) {
+        await withQueueRetries(() => contract.waitForDeployment(), `${name} waitForDeployment`)
+        const receipt = await txResponse.wait()
+        const addr = await contract.getAddress()
+        console.log(`[DEPLOY] ✅ ${name} deployed at: ${addr} (block ${receipt.blockNumber})`)
+        return addr
+      } else {
+        await withQueueRetries(() => contract.deployed(), `${name} deployed()`)
+        const receipt = await txResponse.wait()
+        console.log(`[DEPLOY] ✅ ${name} deployed at: ${contract.address} (block ${receipt.blockNumber})`)
+        return contract.address
       }
-
-      await waitForQueue(deployer.address)
-
-      // Send transaction using provider.send directly to bypass Hardhat's transaction handling
-      console.log(`[DEPLOY] ${name} sending transaction via provider...`)
-      const txHash = await withQueueRetries(async () => {
-        // Use eth_sendTransaction instead of sendTransaction to avoid Hardhat's wrapper
-        const hash = await hre.ethers.provider.send("eth_sendTransaction", [txRequest])
-        console.log(`[DEPLOY] ${name} transaction sent:`, hash)
-        return hash
-      }, `${name} send`)
-
-      // Wait for receipt using our custom function
-      const receipt = await withQueueRetries(
-        () => waitForTransactionReceipt(hre.ethers.provider, txHash),
-        `${name} wait`,
-      )
-
-      console.log(`[DEPLOY] ✅ ${name} deployed at:`, receipt.contractAddress)
-      return receipt.contractAddress
     } catch (err) {
       console.error(`❌ Error deploying ${name}:`, err)
       throw err
