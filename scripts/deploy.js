@@ -1,34 +1,25 @@
 require("dotenv").config()
 const hre = require("hardhat")
-const fs = require("fs")
+const fs = require("fs") // optional: only used to write deployments.json
 
-// helpers
+// -------- helpers --------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const isQueueErr = (e) => {
   const m = (e?.message || String(e)).toLowerCase()
   return m.includes("no available queue") || m.includes("queue full") || m.includes("txpool is full")
 }
+const ensure0x = (h) => (typeof h === "string" && !h.startsWith("0x") ? `0x${h}` : h)
 
 // ethers v5/v6 shims
 function formatEther(value) {
-  if (hre.ethers.utils && hre.ethers.utils.formatEther) {
-    // v5
-    return hre.ethers.utils.formatEther(value)
-  } else if (hre.ethers.formatEther) {
-    // v6
-    return hre.ethers.formatEther(value)
-  }
-  return value.toString()
+  if (hre.ethers.utils?.formatEther) return hre.ethers.utils.formatEther(value) // v5
+  if (hre.ethers.formatEther) return hre.ethers.formatEther(value) // v6
+  return String(value)
 }
 function parseUnits(value, decimals) {
-  if (hre.ethers.utils && hre.ethers.utils.parseUnits) {
-    // v5
-    return hre.ethers.utils.parseUnits(value, decimals)
-  } else if (hre.ethers.parseUnits) {
-    // v6
-    return hre.ethers.parseUnits(value, decimals)
-  }
-  throw new Error("Cannot find parseUnits function")
+  if (hre.ethers.utils?.parseUnits) return hre.ethers.utils.parseUnits(value, decimals) // v5
+  if (hre.ethers.parseUnits) return hre.ethers.parseUnits(value, decimals) // v6
+  throw new Error("Cannot find parseUnits")
 }
 
 async function withQueueRetries(fn, label) {
@@ -76,6 +67,36 @@ async function waitForQueue(addr, maxMs = 120000) {
   }
 }
 
+// Poll receipt; tolerant to 0x/no-0x hashes
+async function waitForTransactionReceipt(provider, txHash, maxWaitTime = 300000) {
+  const start = Date.now()
+  const hash0x = ensure0x(txHash)
+  console.log(`[DEPLOY] Waiting for receipt: ${hash0x}`)
+
+  while (Date.now() - start < maxWaitTime) {
+    try {
+      let receipt = await provider.getTransactionReceipt(hash0x)
+      if (receipt) {
+        console.log(`[DEPLOY] Confirmed in block ${receipt.blockNumber}`)
+        return receipt
+      }
+      // Try without 0x as a fallback (some RPCs are odd)
+      if (hash0x.startsWith("0x")) {
+        receipt = await provider.getTransactionReceipt(hash0x.slice(2))
+        if (receipt) {
+          console.log(`[DEPLOY] Confirmed in block ${receipt.blockNumber}`)
+          return receipt
+        }
+      }
+    } catch (err) {
+      console.warn(`[DEPLOY] getReceipt error for ${hash0x}:`, err.message)
+    }
+    await sleep(3000)
+  }
+  throw new Error(`Receipt not found after ${maxWaitTime}ms for ${hash0x}`)
+}
+
+// -------- main --------
 async function main() {
   if (process.env.SKIP_DEPLOY === "true") {
     console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment")
@@ -87,8 +108,6 @@ async function main() {
 
   console.log("[DEPLOY] Network:", hre.network.name)
   console.log("[DEPLOY] Deployer:", deployer.address)
-
-  // Debug ethers version
   console.log("[DEPLOY] Ethers utils available:", !!hre.ethers.utils)
   console.log("[DEPLOY] Ethers formatEther available:", !!hre.ethers.formatEther)
 
@@ -99,24 +118,21 @@ async function main() {
   const OWNER = process.env.OWNER || deployer.address
   const FEE_SINK = process.env.FEE_SINK || deployer.address
   const BOND_TOKEN = process.env.BOND_TOKEN // required
-  const CREATION_FEE = process.env.CREATION_FEE_UNITS || "100" // human units
-  const REDEEM_FEE_BPS = process.env.REDEEM_FEE_BPS || "100" // default 1%
+  const CREATION_FEE = process.env.CREATION_FEE_UNITS || "100"
+  const REDEEM_FEE_BPS = process.env.REDEEM_FEE_BPS || "100"
 
   if (!BOND_TOKEN) throw new Error("❌ BOND_TOKEN is required (ERC20 address).")
-  if (!BOND_TOKEN.startsWith("0x")) throw new Error("❌ BOND_TOKEN must be a 0x-prefixed address.")
+  if (!BOND_TOKEN.startsWith("0x")) throw new Error("❌ BOND_TOKEN must be 0x-prefixed.")
 
-  // resolve decimals/symbol so "100" => 100.0 tokens
+  // Resolve decimals/symbol for creation fee
   const erc20Abi = [
     "function decimals() view returns (uint8)",
     "function symbol() view returns (string)"
   ]
   const bond = new hre.ethers.Contract(BOND_TOKEN, erc20Abi, hre.ethers.provider)
   const [decimals, symbol] = await Promise.all([bond.decimals(), bond.symbol().catch(() => "BOND")])
-
   const creationFeeWei = parseUnits(String(CREATION_FEE), decimals)
   console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol} (${creationFeeWei.toString()} base units)`)
-
-  const isV6 = !!hre.ethers.formatEther // crude but reliable
 
   async function deployOne(name, args) {
     console.log(`\n[DEPLOY] ${name}...`)
@@ -126,47 +142,53 @@ async function main() {
       Factory.interface.fragments.map((f) => f.name || f.type),
     )
 
+    // Build raw deploy tx
+    const deployTx = await Factory.getDeployTransaction(...args)
+
+    // Minimal request; leave fees to populateTransaction
+    const txRequest = {
+      from: deployer.address,
+      to: undefined,             // contract creation
+      data: deployTx.data,       // bytecode + encoded ctor args
+      value: undefined
+    }
+
+    // Estimate and set gas limit (avoid provider doing it after signing)
+    const estimatedGas = await deployer.estimateGas(txRequest)
+    txRequest.gasLimit = estimatedGas
+    console.log(`[DEPLOY] ${name} estimated gas: ${estimatedGas.toString()}`)
+
     await waitForQueue(deployer.address)
 
-    try {
-      // Standard ethers deploy path -> signs locally -> eth_sendRawTransaction
-      const contract = await withQueueRetries(() => Factory.deploy(...args), `${name} deploy`)
-
-      // Get tx hash in both ethers versions
-      let txResponse
-      if (isV6) {
-        txResponse = contract.deploymentTransaction()
-      } else {
-        txResponse = contract.deployTransaction
-      }
-      const txHash = txResponse?.hash
-      if (txHash) console.log(`[DEPLOY] ${name} tx: ${txHash}`)
-
-      // Wait for deployment/confirmation and receipt
-      if (isV6) {
-        await withQueueRetries(() => contract.waitForDeployment(), `${name} waitForDeployment`)
-        const receipt = await txResponse.wait()
-        const addr = await contract.getAddress()
-        console.log(`[DEPLOY] ✅ ${name} deployed at: ${addr} (block ${receipt.blockNumber})`)
-        return addr
-      } else {
-        await withQueueRetries(() => contract.deployed(), `${name} deployed()`)
-        const receipt = await txResponse.wait()
-        console.log(`[DEPLOY] ✅ ${name} deployed at: ${contract.address} (block ${receipt.blockNumber})`)
-        return contract.address
-      }
-    } catch (err) {
-      console.error(`❌ Error deploying ${name}:`, err)
-      throw err
+    // Populate (nonce, chainId, fees), sign, and send raw
+    const populated = await deployer.populateTransaction(txRequest)
+    const signed = await withQueueRetries(() => deployer.signTransaction(populated), `${name} sign`)
+    const txHashRaw = await withQueueRetries(
+      () => hre.ethers.provider.send("eth_sendRawTransaction", [signed]),
+      `${name} sendRaw`
+    )
+    const txHash = ensure0x(txHashRaw)
+    if (txHash !== txHashRaw) {
+      console.log(`[DEPLOY] ${name} RPC returned non-0x hash; normalized -> ${txHash}`)
     }
+    console.log(`[DEPLOY] ${name} tx: ${txHash}`)
+
+    // Wait for receipt (no Hardhat checkTx calls)
+    const receipt = await withQueueRetries(
+      () => waitForTransactionReceipt(hre.ethers.provider, txHash),
+      `${name} wait`
+    )
+
+    console.log(`[DEPLOY] ✅ ${name} deployed at: ${receipt.contractAddress} (block ${receipt.blockNumber})`)
+    return receipt.contractAddress
   }
 
   const ctor = [OWNER, FEE_SINK, BOND_TOKEN, creationFeeWei, REDEEM_FEE_BPS]
-
   const binaryFactory = await deployOne("BinaryFactory", ctor)
   const categoricalFactory = await deployOne("CategoricalFactory", ctor)
   const scalarFactory = await deployOne("ScalarFactory", ctor)
 
+  // Optional: write a deployment manifest
   const deploymentData = {
     network: hre.network.name,
     deployedAt: new Date().toISOString(),
@@ -181,7 +203,6 @@ async function main() {
       ScalarFactory: scalarFactory,
     },
   }
-
   fs.writeFileSync("./deployments.json", JSON.stringify(deploymentData, null, 2))
   console.log("[DEPLOY] ✅ Wrote deployments.json")
 }
