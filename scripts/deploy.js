@@ -17,6 +17,37 @@
 require("dotenv").config();
 const hre = require("hardhat");
 
+// Utility to pause execution for a specified number of milliseconds.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Waits until the network's pending transaction queue for the given
+// address is empty or a timeout has elapsed. Some RPC providers on
+// kaspaTestnet return "no available queue" errors when the address has
+// unmined transactions pending. Monitoring the nonce difference between
+// pending and latest allows us to wait for the queue to drain.
+async function waitForQueue(provider, address, maxWaitMs = 120000) {
+  const start = Date.now();
+  while (true) {
+    try {
+      const pending = await provider.getTransactionCount(address, "pending");
+      const latest = await provider.getTransactionCount(address, "latest");
+      const diff = Number(pending - latest);
+      if (diff <= 0) return;
+      if (Date.now() - start > maxWaitMs) {
+        console.log(`[QUEUE] waited ${maxWaitMs}ms; still ${diff} pending — continuing.`);
+        return;
+      }
+      console.log(`[QUEUE] ${diff} pending tx(s). waiting 4s...`);
+      await sleep(4000);
+    } catch (e) {
+      console.log("[QUEUE] error reading nonce; continuing:", e?.message || String(e));
+      return;
+    }
+  }
+}
+
 async function main() {
   // Respect SKIP_DEPLOY to allow running tests without hitting the network.
   if (String(process.env.SKIP_DEPLOY || "false").toLowerCase() === "true") {
@@ -101,10 +132,37 @@ async function main() {
     // ample balance.
     deployTx.gasLimit = estimatedGas;
 
-    // Send the transaction using the deployer's wallet. The returned
-    // `txResponse` contains the hash and other metadata. Hardhat and
-    // ethers.js automatically populate nonce, chainId and gas price.
-    const txResponse = await deployer.sendTransaction(deployTx);
+    // Before sending, wait for the account's pending queue to clear. The
+    // kaspaTestnet RPC enforces a single tx queue per account; attempting
+    // to send a new transaction while one is unmined results in the
+    // "no available queue" error. Waiting ensures the previous deployment
+    // completes before proceeding.
+    await waitForQueue(provider, deployer.address, 120000);
+
+    // Send the transaction with retry logic. If the provider returns
+    // "no available queue", wait and retry up to a few times with
+    // exponential backoff. Other errors are rethrown.
+    let txResponse;
+    const maxRetries = 5;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        txResponse = await deployer.sendTransaction(deployTx);
+        break;
+      } catch (err) {
+        const msg = (err && err.message) ? err.message : String(err);
+        if (/no available queue/i.test(msg) && attempt < maxRetries) {
+          const delay = Math.min(60000, 3000 * 2 ** attempt);
+          console.log(`[QUEUE] ${name}: queue busy, retrying in ${delay}ms...`);
+          await sleep(delay);
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!txResponse) {
+      throw new Error(`Failed to send ${name} deployment transaction`);
+    }
+
     // Normalise the hash by ensuring it has a 0x prefix. Some custom
     // JSON-RPC providers omit this prefix, causing clients to reject
     // the hash as invalid. Adding it conditionally ensures universal
@@ -115,12 +173,16 @@ async function main() {
     }
     console.log(`[DEPLOY] ${name} tx:`, txHash);
 
-    // Await confirmation of the deployment. The receipt includes the
-    // deployed contract address under contractAddress. Once mined, the
-    // factory can be instantiated via `Factory.attach()` if further
-    // interaction is required within this script.
-    const receipt = await txResponse.wait();
-    const address = receipt.contractAddress;
+    // Await confirmation of the deployment. We avoid using txResponse.wait()
+    // because Hardhat's internal implementation calls
+    // provider.getTransaction() with the raw hash returned from some
+    // RPC providers. If the provider omits the "0x" prefix, Hardhat
+    // attempts to decode a non-prefixed hex string and throws an
+    // unmarshalling error ("invalid argument 0: json: cannot unmarshal hex
+    // string without 0x prefix"). Instead, we call `provider.waitForTransaction`
+    // ourselves with the normalised hash to retrieve the receipt.
+    const receipt = await provider.waitForTransaction(txHash);
+    const address = receipt && receipt.contractAddress;
     console.log(`✅ ${name} deployed at:`, address);
   }
 }
