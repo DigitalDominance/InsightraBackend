@@ -8,6 +8,22 @@ const formatEther = E.formatEther || (E.utils && E.utils.formatEther);
 const parseUnits = E.parseUnits || (E.utils && E.utils.parseUnits);
 
 async function main() {
+
+  // Some Kasplex/Kaspa RPCs can reject when there are pending txs ("no available queue").
+  // This waits for the pending nonce to catch up to latest.
+  async function waitForQueue(addr, maxMs = 120000) {
+    const start = Date.now();
+    while (true) {
+      const pending = await E.provider.getTransactionCount(addr, "pending");
+      const latest = await E.provider.getTransactionCount(addr, "latest");
+      if (pending === latest) return;
+      if (Date.now() - start > maxMs) return;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  function with0x(h) { return typeof h === "string" && h.startsWith("0x") ? h : ("0x" + h); }
+
   // Ensure artifacts exist when running via `node scripts/deploy.js`
   await hre.run('compile');
   // Optional: skip deploys on certain dyno boots
@@ -62,11 +78,12 @@ async function main() {
     deployTx.gasLimit = estimatedGas;
 
     // Broadcast
+    await waitForQueue(deployer.address);
     const sentTx = await deployer.sendTransaction(deployTx);
     console.log(`[DEPLOY] Sent ${name} TX:`, sentTx.hash);
 
     // Wait for confirmation
-    const receipt = await sentTx.wait();
+    const receipt = await E.provider.waitForTransaction(with0x(sentTx.hash));
     console.log(`✅ ${name} deployed at:`, receipt.contractAddress);
     return receipt.contractAddress;
   }

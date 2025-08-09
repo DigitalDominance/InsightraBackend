@@ -207,8 +207,8 @@ Each factory records all created markets:
 ```mermaid
 flowchart TD
     A[User] -->|approves 100 BOND_TOKEN| B(BOND_TOKEN)
-    A -->|calls submit* on factory| F(Factory)
-    B -->|transferFrom(user → feeSink)| F
+    A -->|calls submit() on factory| F(Factory)
+    B -->|transferFrom(user -> feeSink)| F
     F -->|deploys| M(New Market)
     F -->|register| R[Registry: allMarkets[]]
     F -->|emit *Created| L[Logs/Events]
@@ -222,9 +222,37 @@ flowchart TD
 <summary><strong>Text fallback</strong> (for viewers that don't render Mermaid)</summary>
 
 User → (approve 100 BOND_TOKEN to Factory) → Factory
-User → (submit*) → Factory
+User → (submit()) → Factory
 Factory → (transferFrom user→feeSink) → FeeSink
 Factory → deploy → New Market
 Factory → register → Registry (allMarkets[], isMarket, isRemoved)
 DAO/Owner → removeListing/restoreListing → Registry flags
 </details>
+
+
+### Lifecycle
+
+```mermaid
+sequenceDiagram
+  participant DAO as DAO / Factory Owner
+  participant F as Factory
+  participant M as Market
+  participant O as KasOracle
+  participant U as Users
+
+  DAO->>F: deploy factory (feeSink, redeemFeeBps)
+  DAO->>F: create {Binary|Categorical|Scalar} market(questionId)
+
+  Note over DAO,O: Ensure oracle's questionId matches and reaches FINAL/ARBITRATED
+
+  U->>M: split(collateral) -> mint outcome tokens
+  U->>U: trade outcome tokens on DEX (optional)
+
+  O-->>O: optimistic resolution / arbitration
+  U->>M: finalizeFromOracle() (anyone)
+  M-->>O: read getStatus/getBestAnswer
+  M-->>M: store resolvedAnswer
+
+  U->>M: redeem(winning tokens)
+  M-->>U: collateral minus redeem fee -> feeSink
+```
