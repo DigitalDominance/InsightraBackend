@@ -2,23 +2,11 @@ require("dotenv").config()
 const hre = require("hardhat")
 const fs = require("fs")
 
-// ethers v5/v6 shims (minimal)
-const E = hre.ethers
-const formatEther = E.formatEther || (E.utils && E.utils.formatEther)
-const parseUnits = E.parseUnits || (E.utils && E.utils.parseUnits)
-const isBN = (x) => x && typeof x === "object" && typeof x.mul === "function"
-
 // helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const isQueueErr = (e) => {
   const m = (e?.message || String(e)).toLowerCase()
   return m.includes("no available queue") || m.includes("queue full") || m.includes("txpool is full")
-}
-
-// Ensure hash has 0x prefix
-const ensureHexPrefix = (hash) => {
-  if (!hash) return hash
-  return hash.startsWith("0x") ? hash : `0x${hash}`
 }
 
 async function withQueueRetries(fn, label) {
@@ -50,13 +38,12 @@ async function withQueueRetries(fn, label) {
 
 async function waitForQueue(addr, maxMs = 120000) {
   const start = Date.now()
-
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       const [pending, latest] = await Promise.all([
-        E.provider.getTransactionCount(addr, "pending"),
-        E.provider.getTransactionCount(addr, "latest"),
+        hre.ethers.provider.getTransactionCount(addr, "pending"),
+        hre.ethers.provider.getTransactionCount(addr, "latest"),
       ])
       if (pending <= latest) return
       if (Date.now() - start > maxMs) return
@@ -69,43 +56,6 @@ async function waitForQueue(addr, maxMs = 120000) {
   }
 }
 
-// Custom transaction receipt waiter that handles Kaspa's hash format
-async function waitForTransactionReceipt(txHash, maxWaitTime = 300000) {
-  const start = Date.now()
-  const normalizedHash = ensureHexPrefix(txHash)
-
-  console.log(`[DEPLOY] Waiting for transaction receipt: ${normalizedHash}`)
-
-  while (Date.now() - start < maxWaitTime) {
-    try {
-      const receipt = await E.provider.getTransactionReceipt(normalizedHash)
-      if (receipt) {
-        console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
-        return receipt
-      }
-    } catch (err) {
-      // If we get the hex prefix error, try without prefix
-      if (err.message.includes("cannot unmarshal hex string without 0x prefix")) {
-        try {
-          const receipt = await E.provider.getTransactionReceipt(txHash.replace("0x", ""))
-          if (receipt) {
-            console.log(`[DEPLOY] Transaction confirmed in block: ${receipt.blockNumber}`)
-            return receipt
-          }
-        } catch (err2) {
-          console.warn(`[DEPLOY] Error getting receipt (attempt 2):`, err2.message)
-        }
-      } else {
-        console.warn(`[DEPLOY] Error getting receipt:`, err.message)
-      }
-    }
-
-    await sleep(2000) // Wait 2 seconds before trying again
-  }
-
-  throw new Error(`Transaction receipt not found after ${maxWaitTime}ms`)
-}
-
 async function main() {
   if (process.env.SKIP_DEPLOY === "true") {
     console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment")
@@ -113,13 +63,13 @@ async function main() {
   }
 
   await hre.run("compile")
-  const [deployer] = await E.getSigners()
+  const [deployer] = await hre.ethers.getSigners()
 
   console.log("[DEPLOY] Network:", hre.network.name)
   console.log("[DEPLOY] Deployer:", deployer.address)
 
-  const bal = await E.provider.getBalance(deployer.address)
-  console.log("[DEPLOY] Balance (native):", formatEther ? formatEther(bal) : String(bal))
+  const balance = await hre.ethers.provider.getBalance(deployer.address)
+  console.log("[DEPLOY] Balance (native):", hre.ethers.utils.formatEther(balance))
 
   // env/config
   const OWNER = process.env.OWNER || deployer.address
@@ -133,40 +83,36 @@ async function main() {
   // resolve decimals/symbol so "100" => 100.0 tokens
   const erc20Abi = ["function decimals() view returns (uint8)", "function symbol() view returns (string)"]
 
-  const bond = new E.Contract(BOND_TOKEN, erc20Abi, E.provider)
+  const bond = new hre.ethers.Contract(BOND_TOKEN, erc20Abi, hre.ethers.provider)
   const [decimals, symbol] = await Promise.all([bond.decimals(), bond.symbol().catch(() => "BOND")])
 
-  const creationFeeWei = parseUnits
-    ? parseUnits(String(CREATION_FEE), decimals)
-    : E.utils.parseUnits(String(CREATION_FEE), decimals)
-
+  const creationFeeWei = hre.ethers.utils.parseUnits(String(CREATION_FEE), decimals)
   console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol} (${creationFeeWei.toString()} base units)`)
 
   async function deployOne(name, args) {
     console.log(`\n[DEPLOY] ${name}...`)
-    const Factory = await E.getContractFactory(name)
+    const Factory = await hre.ethers.getContractFactory(name)
+
+    console.log(
+      `[DEPLOY] ${name} interface loaded:`,
+      Factory.interface.fragments.map((f) => f.name || f.type),
+    )
 
     try {
-      // Prepare deployment transaction
+      // Prepare the deployment transaction
       const deployTx = await Factory.getDeployTransaction(...args)
-      console.log(`[DEPLOY] ${name} deploy transaction prepared`)
+      console.log(`[DEPLOY] ${name} raw deploy TX:`, deployTx)
 
       // Estimate gas
       const estimatedGas = await deployer.estimateGas(deployTx)
       console.log(`[DEPLOY] ${name} estimated gas:`, estimatedGas.toString())
 
       // Set gas limit with buffer
-      if (typeof estimatedGas === "bigint") {
-        deployTx.gasLimit = (estimatedGas * 120n) / 100n
-      } else if (isBN(estimatedGas)) {
-        deployTx.gasLimit = estimatedGas.mul(12).div(10)
-      } else {
-        deployTx.gasLimit = estimatedGas
-      }
+      deployTx.gasLimit = estimatedGas.mul(12).div(10) // 20% buffer
 
       // Optional fee caps
       try {
-        const fee = await E.provider.getFeeData()
+        const fee = await hre.ethers.provider.getFeeData()
         if (fee && fee.maxFeePerGas != null) deployTx.maxFeePerGas = fee.maxFeePerGas
         if (fee && fee.maxPriorityFeePerGas != null) deployTx.maxPriorityFeePerGas = fee.maxPriorityFeePerGas
       } catch (err) {
@@ -175,20 +121,49 @@ async function main() {
 
       await waitForQueue(deployer.address)
 
-      // Send transaction using provider directly to avoid Hardhat's checkTx
-      const sentTx = await withQueueRetries(async () => {
-        // Use provider.sendTransaction instead of deployer.sendTransaction
-        const response = await E.provider.sendTransaction(deployTx)
-        console.log(`[DEPLOY] ${name} raw response:`, response)
-        return response
-      }, `${name} send`)
+      // Send transaction with queue retries
+      const sentTx = await withQueueRetries(() => deployer.sendTransaction(deployTx), `${name} send`)
 
-      console.log(`[DEPLOY] ${name} tx hash: ${sentTx.hash || sentTx}`)
+      console.log(`[DEPLOY] ${name} sent raw TX:`, sentTx.hash)
 
-      // Use our custom receipt waiter
-      const receipt = await withQueueRetries(() => waitForTransactionReceipt(sentTx.hash || sentTx), `${name} wait`)
+      // Wait for confirmation with custom error handling
+      let receipt
+      try {
+        receipt = await sentTx.wait()
+      } catch (waitError) {
+        console.warn(`[DEPLOY] Error waiting for ${name} receipt:`, waitError.message)
 
-      console.log(`[DEPLOY] ✅ ${name} deployed at: ${receipt.contractAddress}`)
+        // If it's the hex prefix error, try to get receipt manually
+        if (waitError.message.includes("cannot unmarshal hex string without 0x prefix")) {
+          console.log(`[DEPLOY] Attempting manual receipt lookup for ${name}...`)
+
+          // Wait a bit for the transaction to be mined
+          await sleep(5000)
+
+          // Try to get receipt directly
+          try {
+            const hash = sentTx.hash.startsWith("0x") ? sentTx.hash : `0x${sentTx.hash}`
+            receipt = await hre.ethers.provider.getTransactionReceipt(hash)
+
+            if (!receipt) {
+              // Try without 0x prefix
+              const hashWithoutPrefix = sentTx.hash.replace("0x", "")
+              receipt = await hre.ethers.provider.getTransactionReceipt(hashWithoutPrefix)
+            }
+          } catch (receiptError) {
+            console.error(`[DEPLOY] Could not get receipt for ${name}:`, receiptError.message)
+            throw receiptError
+          }
+        } else {
+          throw waitError
+        }
+      }
+
+      if (!receipt) {
+        throw new Error(`[DEPLOY] No receipt found for ${name}`)
+      }
+
+      console.log(`[DEPLOY] ✅ ${name} deployed at:`, receipt.contractAddress)
       return receipt.contractAddress
     } catch (err) {
       console.error(`❌ Error deploying ${name}:`, err)
