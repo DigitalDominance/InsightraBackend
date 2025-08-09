@@ -49,7 +49,8 @@ contract ScalarMarket is MarketBase {
         shortToken = new OutcomeToken(string(abi.encodePacked(marketName, " SHORT")), "SHORT", address(this));
     }
 
-    function split(uint256 amount) external onlyOpen {
+    /// @dev Added `nonReentrant` to guard against re-entrancy via malicious tokens.
+    function split(uint256 amount) external onlyOpen nonReentrant {
         require(amount > 0, "amount=0");
         collateral.safeTransferFrom(msg.sender, address(this), amount);
         collateralLocked += amount;
@@ -58,7 +59,7 @@ contract ScalarMarket is MarketBase {
         emit Split(msg.sender, amount);
     }
 
-    function merge(uint256 sets) external onlyOpen {
+    function merge(uint256 sets) external onlyOpen nonReentrant {
         require(sets > 0, "sets=0");
         longToken.burn(msg.sender, sets);
         shortToken.burn(msg.sender, sets);
@@ -80,7 +81,7 @@ contract ScalarMarket is MarketBase {
         resolvedAnswer = abi.encode(v);
     }
 
-    function redeemLong(uint256 amount) external returns (uint256 netOut) {
+    function redeemLong(uint256 amount) external nonReentrant returns (uint256 netOut) {
         if (!isResolved()) finalizeFromOracle();
         require(amount > 0, "amount=0");
         longToken.burn(msg.sender, amount);
@@ -92,7 +93,7 @@ contract ScalarMarket is MarketBase {
         emit Redeemed(msg.sender, netOut, abi.encode(true, amount));
     }
 
-    function redeemShort(uint256 amount) external returns (uint256 netOut) {
+    function redeemShort(uint256 amount) external nonReentrant returns (uint256 netOut) {
         if (!isResolved()) finalizeFromOracle();
         require(amount > 0, "amount=0");
         shortToken.burn(msg.sender, amount);

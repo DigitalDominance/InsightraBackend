@@ -53,7 +53,9 @@ contract CategoricalMarket is MarketBase {
     }
 
     /* ##########    Pre-resolution mechanics    ########## */
-    function split(uint256 amount) external onlyOpen {
+    /// @dev Added `nonReentrant` to prevent re-entry during ERC20 transfers.
+    /// See OpenZeppelin documentation on `ReentrancyGuard` for details【815247830185898†L1399-L1404】.
+    function split(uint256 amount) external onlyOpen nonReentrant {
         require(amount > 0, "amount=0");
         collateral.safeTransferFrom(msg.sender, address(this), amount);
         collateralLocked += amount;
@@ -63,7 +65,7 @@ contract CategoricalMarket is MarketBase {
         emit Split(msg.sender, amount);
     }
 
-    function merge(uint256 sets) external onlyOpen {
+    function merge(uint256 sets) external onlyOpen nonReentrant {
         require(sets > 0, "sets=0");
         for (uint8 i = 0; i < outcomeCount; i++) {
             outcomeTokens[i].burn(msg.sender, sets);
@@ -82,7 +84,7 @@ contract CategoricalMarket is MarketBase {
         resolvedAnswer = oracleEncoded;
     }
 
-    function redeem(uint256 amount) external returns (uint256 netOut) {
+    function redeem(uint256 amount) external nonReentrant returns (uint256 netOut) {
         if (!isResolved()) finalizeFromOracle();
         require(amount > 0, "amount=0");
 

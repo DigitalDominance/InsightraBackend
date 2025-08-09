@@ -36,7 +36,15 @@ contract BinaryMarket is MarketBase {
     /* ##########    Pre-resolution mechanics (split/merge)    ########## */
 
     /// @notice Lock `amount` collateral to mint 1 YES and 1 NO per unit
-    function split(uint256 amount) external onlyOpen {
+    ///
+    /// @dev Added `nonReentrant` to protect against malicious ERC20 tokens that
+    /// could attempt to re-enter via transfer hooks.  See OpenZeppelin's
+    /// `ReentrancyGuard` documentation which explains that inheriting
+    /// `ReentrancyGuard` exposes the `nonReentrant` modifier for use in
+    /// external functions【815247830185898†L1399-L1404】. Without this guard,
+    /// a malicious token implementing custom `transferFrom` logic could
+    /// re-enter and manipulate internal state【334902821886621†L214-L220】.
+    function split(uint256 amount) external onlyOpen nonReentrant {
         require(amount > 0, "amount=0");
         collateral.safeTransferFrom(msg.sender, address(this), amount);
         collateralLocked += amount;
@@ -46,7 +54,7 @@ contract BinaryMarket is MarketBase {
     }
 
     /// @notice Burn complete sets to retrieve collateral 1:1 pre-resolution
-    function merge(uint256 sets) external onlyOpen {
+    function merge(uint256 sets) external onlyOpen nonReentrant {
         require(sets > 0, "sets=0");
         yesToken.burn(msg.sender, sets);
         noToken.burn(msg.sender, sets);
@@ -67,7 +75,7 @@ contract BinaryMarket is MarketBase {
     }
 
     /// @notice Redeem winning tokens after resolution (anyone can call finalize first)
-    function redeem(uint256 amount) external returns (uint256 netOut) {
+    function redeem(uint256 amount) external nonReentrant returns (uint256 netOut) {
         if (!isResolved()) finalizeFromOracle();
         require(amount > 0, "amount=0");
 
