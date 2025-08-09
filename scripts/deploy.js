@@ -9,6 +9,32 @@ const isQueueErr = (e) => {
   return m.includes("no available queue") || m.includes("queue full") || m.includes("txpool is full")
 }
 
+// Helper to handle ethers v5/v6 differences
+function formatEther(value) {
+  if (hre.ethers.utils && hre.ethers.utils.formatEther) {
+    // ethers v5
+    return hre.ethers.utils.formatEther(value)
+  } else if (hre.ethers.formatEther) {
+    // ethers v6
+    return hre.ethers.formatEther(value)
+  } else {
+    // fallback - just show the raw value
+    return value.toString()
+  }
+}
+
+function parseUnits(value, decimals) {
+  if (hre.ethers.utils && hre.ethers.utils.parseUnits) {
+    // ethers v5
+    return hre.ethers.utils.parseUnits(value, decimals)
+  } else if (hre.ethers.parseUnits) {
+    // ethers v6
+    return hre.ethers.parseUnits(value, decimals)
+  } else {
+    throw new Error("Cannot find parseUnits function")
+  }
+}
+
 async function withQueueRetries(fn, label) {
   const BASE = Number(process.env.RETRY_BASE_MS || 2500)
   const MAX = Number(process.env.RETRY_MAX_MS || 120000)
@@ -68,9 +94,13 @@ async function main() {
   console.log("[DEPLOY] Network:", hre.network.name)
   console.log("[DEPLOY] Deployer:", deployer.address)
 
-  // Fetch and print balance - using the exact same approach as working example
+  // Debug ethers version
+  console.log("[DEPLOY] Ethers utils available:", !!hre.ethers.utils)
+  console.log("[DEPLOY] Ethers formatEther available:", !!hre.ethers.formatEther)
+
+  // Fetch and print balance
   const balance = await hre.ethers.provider.getBalance(deployer.address)
-  console.log("[DEPLOY] Balance (native):", hre.ethers.utils.formatEther(balance))
+  console.log("[DEPLOY] Balance (native):", formatEther(balance))
 
   // env/config
   const OWNER = process.env.OWNER || deployer.address
@@ -87,7 +117,7 @@ async function main() {
   const bond = new hre.ethers.Contract(BOND_TOKEN, erc20Abi, hre.ethers.provider)
   const [decimals, symbol] = await Promise.all([bond.decimals(), bond.symbol().catch(() => "BOND")])
 
-  const creationFeeWei = hre.ethers.utils.parseUnits(String(CREATION_FEE), decimals)
+  const creationFeeWei = parseUnits(String(CREATION_FEE), decimals)
   console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol} (${creationFeeWei.toString()} base units)`)
 
   async function deployOne(name, args) {
@@ -100,20 +130,20 @@ async function main() {
     )
 
     try {
-      // Prepare the deployment transaction - exactly like working example
+      // Prepare the deployment transaction
       const deployTx = await Factory.getDeployTransaction(...args)
       console.log(`[DEPLOY] ${name} raw deploy TX:`, deployTx)
 
-      // Estimate gas - exactly like working example
+      // Estimate gas
       const estimatedGas = await deployer.estimateGas(deployTx)
       console.log(`[DEPLOY] ${name} estimated gas:`, estimatedGas.toString())
 
-      // Set gas limit - exactly like working example
+      // Set gas limit
       deployTx.gasLimit = estimatedGas
 
       await waitForQueue(deployer.address)
 
-      // Send transaction with queue retries - but use exact same method as working example
+      // Send transaction with queue retries
       const sentTx = await withQueueRetries(() => deployer.sendTransaction(deployTx), `${name} send`)
 
       console.log(`[DEPLOY] ${name} sent raw TX:`, sentTx.hash)
