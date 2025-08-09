@@ -52,7 +52,8 @@ flowchart TD
 
 ## Lifecycle
 
-```mermaid
+```
+mermaid
 sequenceDiagram
   participant DAO as DAO / Factory Owner
   participant F as Factory
@@ -172,8 +173,7 @@ Then, create markets (owner-only by default):
   - Scalar rounding and clamping on extremes
   - Reentrancy guards on redemption
 ```
-
-
+```
 
 ## User-created Listings & Fees
 

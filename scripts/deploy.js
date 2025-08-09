@@ -8,6 +8,8 @@ const formatEther = E.formatEther || (E.utils && E.utils.formatEther);
 const parseUnits = E.parseUnits || (E.utils && E.utils.parseUnits);
 
 async function main() {
+  // Ensure artifacts exist when running via `node scripts/deploy.js`
+  await hre.run('compile');
   // Optional: skip deploys on certain dyno boots
   if ((process.env.SKIP_DEPLOY || "false").toLowerCase() === "true") {
     console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment");
