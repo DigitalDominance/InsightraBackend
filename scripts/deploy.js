@@ -2,101 +2,168 @@
 require("dotenv").config();
 const hre = require("hardhat");
 
-// v5/v6 friendly helpers
+// Ethers v5/v6 compatibility shims
 const E = hre.ethers;
+const toBigInt = (x) => (typeof x === "bigint" ? x : BigInt(String(x)));
 const formatEther = E.formatEther || (E.utils && E.utils.formatEther);
 const parseUnits = E.parseUnits || (E.utils && E.utils.parseUnits);
+const getContractAddress =
+  E.getCreateAddress
+    ? ({ from, nonce }) => E.getCreateAddress({ from, nonce })
+    : ({ from, nonce }) => E.utils.getContractAddress({ from, nonce });
+
+function add0x(s) {
+  if (typeof s !== "string") return s;
+  return s.startsWith("0x") ? s : "0x" + s;
+}
 
 async function main() {
+  // Allow bypass during Heroku boot, etc.
+  if (process.env.SKIP_DEPLOY === "true") {
+    console.log("⚡ SKIP_DEPLOY=true — skipping on-chain deployment");
+    return;
+  }
 
-  // Some Kasplex/Kaspa RPCs can reject when there are pending txs ("no available queue").
-  // This waits for the pending nonce to catch up to latest.
+  const [deployer] = await E.getSigners();
+  console.log("[DEPLOY] Network:", hre.network.name);
+  console.log("[DEPLOY] Deployer:", deployer.address);
+
+  // Show balance in native currency
+  const bal = await E.provider.getBalance(deployer.address);
+  console.log("[DEPLOY] Balance:", (formatEther ? formatEther(bal) : (Number(bal)/1e18)) , "(native)");
+
+  // ---- Constructor parameters (via ENV) ----
+  const OWNER          = process.env.OWNER || deployer.address;
+  const FEE_SINK       = process.env.FEE_SINK || deployer.address;
+  const BOND_TOKEN     = process.env.BOND_TOKEN;      // required
+  const CREATION_FEE   = process.env.CREATION_FEE_UNITS || "100"; // human units (e.g., 100 tokens)
+  const REDEEM_FEE_BPS = process.env.REDEEM_FEE_BPS || "100";     // default 1%
+
+  if (!BOND_TOKEN) {
+    throw new Error("❌ BOND_TOKEN is required (ERC20 address used to charge creation fee).");
+  }
+
+  // Resolve decimals from the BOND_TOKEN on-chain so 100 means '100.0 tokens'
+  const erc20Abi = [
+    "function decimals() view returns (uint8)",
+    "function symbol() view returns (string)",
+    "function name() view returns (string)",
+  ];
+  const bond = new E.Contract(BOND_TOKEN, erc20Abi, E.provider);
+  const [decimals, symbol, name] = await Promise.all([
+    bond.decimals(),
+    bond.symbol().catch(() => ""),
+    bond.name().catch(() => ""),
+  ]);
+
+  const creationFeeWei = parseUnits ? parseUnits(String(CREATION_FEE), decimals) : E.utils.parseUnits(String(CREATION_FEE), decimals);
+  console.log(`[DEPLOY] Bond token: ${name} (${symbol}) @ ${BOND_TOKEN} | decimals=${decimals}`);
+  console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol || "BOND"} (${creationFeeWei.toString()} base units)`);
+  console.log(`[DEPLOY] Redeem fee (bps): ${REDEEM_FEE_BPS}`);
+  console.log(`[DEPLOY] Owner: ${OWNER}`);
+  console.log(`[DEPLOY] Fee sink: ${FEE_SINK}`);
+
+  // Some Kasplex/Kaspa RPCs can return queue-full errors if pending-nonce > latest-nonce.
   async function waitForQueue(addr, maxMs = 120000) {
     const start = Date.now();
     while (true) {
-      const pending = await E.provider.getTransactionCount(addr, "pending");
-      const latest = await E.provider.getTransactionCount(addr, "latest");
-      if (pending === latest) return;
+      const [pending, latest] = await Promise.all([
+        E.provider.getTransactionCount(addr, "pending"),
+        E.provider.getTransactionCount(addr, "latest"),
+      ]);
+      if (pending <= latest) return;
       if (Date.now() - start > maxMs) return;
       await new Promise(r => setTimeout(r, 1500));
     }
   }
 
-  function with0x(h) { return typeof h === "string" && h.startsWith("0x") ? h : ("0x" + h); }
-
-  // Ensure artifacts exist when running via `node scripts/deploy.js`
-  await hre.run('compile');
-  // Optional: skip deploys on certain dyno boots
-  if ((process.env.SKIP_DEPLOY || "false").toLowerCase() === "true") {
-    console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment");
-    return;
-  }
-
-  const [deployer] = await hre.ethers.getSigners();
-  console.log("Deploying with:", deployer.address);
-
-  // Print balance (ethers v6 uses BigInt)
-  const balance = await hre.ethers.provider.getBalance(deployer.address);
-  console.log("Deployer balance (ETH):", formatEther ? formatEther(balance) : String(balance));
-
-  const owner = process.env.OWNER || deployer.address;
-  const feeSink = process.env.FEE_SINK;
-  const bondTokenAddr = process.env.BOND_TOKEN;
-  const redeemFeeBps = Number(process.env.REDEEM_FEE_BPS || 100);
-
-  if (!feeSink) throw new Error("FEE_SINK missing");
-  if (!bondTokenAddr) throw new Error("BOND_TOKEN missing");
-
-  // Resolve creation fee in raw units (default: 100 * 10^decimals(BOND_TOKEN))
-  let creationFee;
-  if (process.env.CREATION_FEE_UNITS) {
-    creationFee = BigInt(process.env.CREATION_FEE_UNITS);
-  } else {
-    const erc20MetaAbi = [ "function decimals() view returns (uint8)" ];
-    const bond = new hre.ethers.Contract(bondTokenAddr, erc20MetaAbi, hre.ethers.provider);
-    const dec = await bond.decimals();
-    creationFee = parseUnits ? parseUnits("100", dec) : BigInt("100") * (10n ** BigInt(dec));
-  }
-
-  console.log("Owner:", owner);
-  console.log("Fee sink:", feeSink);
-  console.log("Bond token:", bondTokenAddr);
-  console.log("Creation fee (raw units):", creationFee.toString());
-  console.log("Redeem fee bps:", redeemFeeBps);
-
+  // Deploy helper using getDeployTransaction() like your working script
   async function deployFactory(name, args) {
-    const Fac = await hre.ethers.getContractFactory(name);
-    console.log(`${name} interface loaded:`, Fac.interface.fragments.map(f => f.name || f.type));
+    console.log(`\n[DEPLOY] Preparing ${name}...`);
+    const Factory = await E.getContractFactory(name);
+    console.log(`[DEPLOY] ${name} ABI loaded with ${Factory.interface.fragments.length} fragments`);
 
-    // Prepare raw deploy TX similar to your working pattern
-    const deployTx = await Fac.getDeployTransaction(...args);
-    console.log(`[DEPLOY] Raw ${name} TX:`, deployTx);
+    // Build the raw deploy tx
+    const unsigned = await Factory.getDeployTransaction(...args);
+    // Gas padding
+    const estGas = await deployer.estimateGas(unsigned);
+    // +20% buffer, preserve type (BigNumber vs bigint)
+    let gasLimit;
+    if (typeof estGas === "bigint") {
+      gasLimit = (estGas * 120n) / 100n;
+    } else if (estGas && typeof estGas.mul === "function") {
+      gasLimit = estGas.mul(12).div(10);
+    } else {
+      gasLimit = toBigInt(estGas);
+    }
+    const feeData = await E.provider.getFeeData().catch(() => ({}));
+    const txRequest = {
+      ...unsigned,
+      gasLimit,
+      maxFeePerGas: feeData.maxFeePerGas || undefined,
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
+      // Do NOT touch .chainId; Hardhat fills it
+    };
 
-    // Estimate gas and set explicit gasLimit
-    const estimatedGas = await deployer.estimateGas(deployTx);
-    console.log(`[DEPLOY] Estimated gas for ${name}:`, estimatedGas.toString());
-    deployTx.gasLimit = estimatedGas;
-
-    // Broadcast
+    // Wait if provider queue is busy
     await waitForQueue(deployer.address);
-    const sentTx = await deployer.sendTransaction(deployTx);
-    console.log(`[DEPLOY] Sent ${name} TX:`, sentTx.hash);
 
-    // Wait for confirmation
-    const receipt = await E.provider.waitForTransaction(with0x(sentTx.hash));
-    console.log(`✅ ${name} deployed at:`, receipt.contractAddress);
-    return receipt.contractAddress;
+    // Send raw deploy transaction
+    const sent = await deployer.sendTransaction(txRequest);
+    const safeHash = add0x(sent.hash);
+    console.log(`[DEPLOY] ${name} tx sent: ${safeHash}`);
+    console.log(`[DEPLOY] Nonce: ${sent.nonce} | GasLimit: ${gasLimit.toString()}`);
+
+    // Predict address from nonce as a fallback
+    const predicted = getContractAddress({ from: deployer.address, nonce: sent.nonce });
+    console.log(`[DEPLOY] Predicted address: ${predicted}`);
+
+    // Wait for confirmation (works v5/v6)
+    let receipt;
+    try {
+      receipt = await sent.wait();
+    } catch (e) {
+      console.warn(`[DEPLOY] .wait() failed (${e && e.message}). Falling back to provider.waitForTransaction...`);
+      receipt = await E.provider.waitForTransaction(safeHash);
+    }
+
+    if (!receipt) throw new Error(`[DEPLOY] No receipt for ${name}`);
+    const deployedAt = receipt.contractAddress || predicted;
+
+    console.log(`[DEPLOY] ✅ ${name} deployed at: ${deployedAt}`);
+    console.log(`[DEPLOY]    Block #${receipt.blockNumber} | gasUsed=${(receipt.gasUsed || receipt.gas).toString()}`);
+
+    return deployedAt;
   }
 
-  const ctor = [owner, feeSink, bondTokenAddr, creationFee, redeemFeeBps];
-  await deployFactory("BinaryFactory", ctor);
-  await deployFactory("CategoricalFactory", ctor);
-  await deployFactory("ScalarFactory", ctor);
+  const ctor = [OWNER, FEE_SINK, BOND_TOKEN, creationFeeWei, REDEEM_FEE_BPS];
+  const binaryFactory     = await deployFactory("BinaryFactory", ctor);
+  const categoricalFactory= await deployFactory("CategoricalFactory", ctor);
+  const scalarFactory     = await deployFactory("ScalarFactory", ctor);
+
+  // Optionally output a single JSON artifact for your server to read
+  const fs = require("fs");
+  const out = {
+    network: hre.network.name,
+    deployedAt: new Date().toISOString(),
+    owner: OWNER,
+    feeSink: FEE_SINK,
+    bondToken: BOND_TOKEN,
+    creationFee: creationFeeWei.toString(),
+    redeemFeeBps: String(REDEEM_FEE_BPS),
+    factories: {
+      BinaryFactory: binaryFactory,
+      CategoricalFactory: categoricalFactory,
+      ScalarFactory: scalarFactory
+    }
+  };
+  fs.writeFileSync("./deployments.json", JSON.stringify(out, null, 2));
+  console.log("[DEPLOY] Wrote deployments.json");
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error("❌ Unhandled error:", err);
-    process.exit(1);
-  });
+main().then(() => process.exit(0)).catch((err) => {
+  // Print full provider error if present
+  if (err && err._stack) console.error(err._stack);
+  console.error("❌ Unhandled error:", err);
+  process.exit(1);
+});
