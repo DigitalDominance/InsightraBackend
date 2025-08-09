@@ -24,6 +24,10 @@ async function main() {
     return;
   }
 
+  // ✅ IMPORTANT: compile when running via `node scripts/deploy.js`
+  await hre.run("compile");
+  console.log("[DEPLOY] Contracts compiled");
+
   const [deployer] = await E.getSigners();
   console.log("[DEPLOY] Network:", hre.network.name);
   console.log("[DEPLOY] Deployer:", deployer.address);
@@ -102,7 +106,6 @@ async function main() {
       gasLimit,
       maxFeePerGas: feeData.maxFeePerGas || undefined,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
-      // Do NOT touch .chainId; Hardhat fills it
     };
 
     // Wait if provider queue is busy
@@ -137,9 +140,9 @@ async function main() {
   }
 
   const ctor = [OWNER, FEE_SINK, BOND_TOKEN, creationFeeWei, REDEEM_FEE_BPS];
-  const binaryFactory     = await deployFactory("BinaryFactory", ctor);
-  const categoricalFactory= await deployFactory("CategoricalFactory", ctor);
-  const scalarFactory     = await deployFactory("ScalarFactory", ctor);
+  const binaryFactory      = await deployFactory("BinaryFactory", ctor);
+  const categoricalFactory = await deployFactory("CategoricalFactory", ctor);
+  const scalarFactory      = await deployFactory("ScalarFactory", ctor);
 
   // Optionally output a single JSON artifact for your server to read
   const fs = require("fs");
@@ -162,7 +165,6 @@ async function main() {
 }
 
 main().then(() => process.exit(0)).catch((err) => {
-  // Print full provider error if present
   if (err && err._stack) console.error(err._stack);
   console.error("❌ Unhandled error:", err);
   process.exit(1);
