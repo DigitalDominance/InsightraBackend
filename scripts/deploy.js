@@ -68,6 +68,7 @@ async function main() {
   console.log("[DEPLOY] Network:", hre.network.name)
   console.log("[DEPLOY] Deployer:", deployer.address)
 
+  // Fetch and print balance - using the exact same approach as working example
   const balance = await hre.ethers.provider.getBalance(deployer.address)
   console.log("[DEPLOY] Balance (native):", hre.ethers.utils.formatEther(balance))
 
@@ -99,34 +100,25 @@ async function main() {
     )
 
     try {
-      // Prepare the deployment transaction
+      // Prepare the deployment transaction - exactly like working example
       const deployTx = await Factory.getDeployTransaction(...args)
       console.log(`[DEPLOY] ${name} raw deploy TX:`, deployTx)
 
-      // Estimate gas
+      // Estimate gas - exactly like working example
       const estimatedGas = await deployer.estimateGas(deployTx)
       console.log(`[DEPLOY] ${name} estimated gas:`, estimatedGas.toString())
 
-      // Set gas limit with buffer
-      deployTx.gasLimit = estimatedGas.mul(12).div(10) // 20% buffer
-
-      // Optional fee caps
-      try {
-        const fee = await hre.ethers.provider.getFeeData()
-        if (fee && fee.maxFeePerGas != null) deployTx.maxFeePerGas = fee.maxFeePerGas
-        if (fee && fee.maxPriorityFeePerGas != null) deployTx.maxPriorityFeePerGas = fee.maxPriorityFeePerGas
-      } catch (err) {
-        console.warn(`[DEPLOY] Could not get fee data:`, err.message)
-      }
+      // Set gas limit - exactly like working example
+      deployTx.gasLimit = estimatedGas
 
       await waitForQueue(deployer.address)
 
-      // Send transaction with queue retries
+      // Send transaction with queue retries - but use exact same method as working example
       const sentTx = await withQueueRetries(() => deployer.sendTransaction(deployTx), `${name} send`)
 
       console.log(`[DEPLOY] ${name} sent raw TX:`, sentTx.hash)
 
-      // Wait for confirmation with custom error handling
+      // Wait for confirmation with custom error handling for the hex prefix issue
       let receipt
       try {
         receipt = await sentTx.wait()
@@ -140,7 +132,7 @@ async function main() {
           // Wait a bit for the transaction to be mined
           await sleep(5000)
 
-          // Try to get receipt directly
+          // Try to get receipt directly with both hash formats
           try {
             const hash = sentTx.hash.startsWith("0x") ? sentTx.hash : `0x${sentTx.hash}`
             receipt = await hre.ethers.provider.getTransactionReceipt(hash)
@@ -149,6 +141,13 @@ async function main() {
               // Try without 0x prefix
               const hashWithoutPrefix = sentTx.hash.replace("0x", "")
               receipt = await hre.ethers.provider.getTransactionReceipt(hashWithoutPrefix)
+            }
+
+            // If we still don't have a receipt, wait longer and try again
+            if (!receipt) {
+              console.log(`[DEPLOY] Waiting longer for ${name} to be mined...`)
+              await sleep(10000)
+              receipt = await hre.ethers.provider.getTransactionReceipt(hash)
             }
           } catch (receiptError) {
             console.error(`[DEPLOY] Could not get receipt for ${name}:`, receiptError.message)
