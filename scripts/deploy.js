@@ -3,7 +3,13 @@ require("dotenv").config();
 const hre = require("hardhat");
 const fs = require("fs");
 
-// small helpers
+// ethers v5/v6 shims (minimal)
+const E = hre.ethers;
+const formatEther = E.formatEther || (E.utils && E.utils.formatEther);
+const parseUnits = E.parseUnits || (E.utils && E.utils.parseUnits);
+const isBN = (x) => x && typeof x === "object" && typeof x.mul === "function";
+
+// helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isQueueErr = (e) => {
   const m = (e?.message || String(e)).toLowerCase();
@@ -14,8 +20,6 @@ async function withQueueRetries(fn, label) {
   const MAX  = Number(process.env.RETRY_MAX_MS  || 120000);
   const FACT = Number(process.env.RETRY_FACTOR || 1.7);
   let i = 0, lastLog = 0;
-
-  // keep retrying but don't spam
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try { return await fn(); }
@@ -33,15 +37,13 @@ async function withQueueRetries(fn, label) {
     }
   }
 }
-
-// throttle if our pending nonce is ahead of latest (prevents piling up)
 async function waitForQueue(addr, maxMs = 120000) {
   const start = Date.now();
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const [pending, latest] = await Promise.all([
-      hre.ethers.provider.getTransactionCount(addr, "pending"),
-      hre.ethers.provider.getTransactionCount(addr, "latest"),
+      E.provider.getTransactionCount(addr, "pending"),
+      E.provider.getTransactionCount(addr, "latest"),
     ]);
     if (pending <= latest) return;
     if (Date.now() - start > maxMs) return;
@@ -56,12 +58,13 @@ async function main() {
   }
 
   await hre.run("compile");
-  const [deployer] = await hre.ethers.getSigners();
+
+  const [deployer] = await E.getSigners();
   console.log("[DEPLOY] Network:", hre.network.name);
   console.log("[DEPLOY] Deployer:", deployer.address);
 
-  const bal = await hre.ethers.provider.getBalance(deployer.address);
-  console.log("[DEPLOY] Balance (native):", hre.ethers.utils.formatEther(bal));
+  const bal = await E.provider.getBalance(deployer.address);
+  console.log("[DEPLOY] Balance (native):", formatEther ? formatEther(bal) : String(bal));
 
   // env/config
   const OWNER          = process.env.OWNER || deployer.address;
@@ -72,36 +75,45 @@ async function main() {
 
   if (!BOND_TOKEN) throw new Error("❌ BOND_TOKEN is required (ERC20 address).");
 
-  // read decimals/symbol so "100" => 100.0 tokens
+  // resolve decimals/symbol so "100" => 100.0 tokens
   const erc20Abi = [
     "function decimals() view returns (uint8)",
     "function symbol() view returns (string)"
   ];
-  const bond = new hre.ethers.Contract(BOND_TOKEN, erc20Abi, hre.ethers.provider);
+  const bond = new E.Contract(BOND_TOKEN, erc20Abi, E.provider);
   const [decimals, symbol] = await Promise.all([
     bond.decimals(),
     bond.symbol().catch(() => "BOND"),
   ]);
-  const creationFeeWei = hre.ethers.utils.parseUnits(String(CREATION_FEE), decimals);
+  const creationFeeWei = parseUnits
+    ? parseUnits(String(CREATION_FEE), decimals)
+    : E.utils.parseUnits(String(CREATION_FEE), decimals);
   console.log(`[DEPLOY] Creation fee: ${CREATION_FEE} ${symbol} (${creationFeeWei.toString()} base units)`);
 
   async function deployOne(name, args) {
     console.log(`\n[DEPLOY] ${name}...`);
-    const Factory = await hre.ethers.getContractFactory(name);
+    const Factory = await E.getContractFactory(name);
 
-    // build raw deploy tx (no extra hash handling)
+    // raw deploy tx
     const txReq = await Factory.getDeployTransaction(...args);
 
-    // estimate gas + modest buffer
+    // estimate gas + buffer
     let est;
     try { est = await deployer.estimateGas(txReq); }
-    catch { est = hre.ethers.BigNumber.from(5_000_000); }
-    txReq.gasLimit = est.mul(12).div(10);
+    catch { est = (typeof 0n === "bigint") ? 5_000_000n : (E.BigNumber ? E.BigNumber.from(5_000_000) : 5_000_000); }
 
-    // optional fee caps if available
-    const fee = await hre.ethers.provider.getFeeData().catch(() => ({}));
-    if (fee.maxFeePerGas) txReq.maxFeePerGas = fee.maxFeePerGas;
-    if (fee.maxPriorityFeePerGas) txReq.maxPriorityFeePerGas = fee.maxPriorityFeePerGas;
+    if (typeof est === "bigint") {
+      txReq.gasLimit = (est * 120n) / 100n;
+    } else if (isBN(est)) {
+      txReq.gasLimit = est.mul(12).div(10);
+    } else {
+      txReq.gasLimit = est;
+    }
+
+    // optional fee caps
+    const fee = await E.provider.getFeeData().catch(() => ({}));
+    if (fee && fee.maxFeePerGas != null) txReq.maxFeePerGas = fee.maxFeePerGas;
+    if (fee && fee.maxPriorityFeePerGas != null) txReq.maxPriorityFeePerGas = fee.maxPriorityFeePerGas;
 
     await waitForQueue(deployer.address);
 
@@ -112,7 +124,7 @@ async function main() {
     );
     console.log(`[DEPLOY] ${name} tx: ${sentTx.hash}`);
 
-    const receipt = await sentTx.wait();       // keep it simple like your example
+    const receipt = await sentTx.wait();
     console.log(`[DEPLOY] ✅ ${name} at: ${receipt.contractAddress}`);
     return receipt.contractAddress;
   }
@@ -122,7 +134,6 @@ async function main() {
   const categoricalFactory = await deployOne("CategoricalFactory", ctor);
   const scalarFactory      = await deployOne("ScalarFactory", ctor);
 
-  // write a simple artifact for the app
   fs.writeFileSync(
     "./deployments.json",
     JSON.stringify({
