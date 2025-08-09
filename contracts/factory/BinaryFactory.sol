@@ -9,8 +9,8 @@ import {FactoryBase} from "./FactoryBase.sol";
 contract BinaryFactory is FactoryBase {
     event BinaryCreated(address market, bytes32 questionId);
 
-    constructor(address _owner, address _feeSink, uint256 _defaultRedeemFeeBps)
-        FactoryBase(_owner, _feeSink, _defaultRedeemFeeBps) {}
+    constructor(address _owner, address _feeSink, IERC20 _bondToken, uint256 _creationFee, uint256 _defaultRedeemFeeBps)
+        FactoryBase(_owner, _feeSink, _bondToken, _creationFee, _defaultRedeemFeeBps) {}
 
     function createBinary(
         IERC20 collateral,
@@ -19,6 +19,21 @@ contract BinaryFactory is FactoryBase {
         string calldata marketName
     ) external onlyOwner returns (BinaryMarket mkt) {
         mkt = new BinaryMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName);
+        _registerMarket(address(mkt));
         emit BinaryCreated(address(mkt), questionId);
     }
+
+/// @notice Public user-submitted market creation (requires paying the creation fee in bondToken)
+function submitBinary(
+    IERC20 collateral,
+    IKasOracle oracle,
+    bytes32 questionId,
+    string calldata marketName
+) external returns (BinaryMarket mkt) {
+    _collectCreationFee();
+    mkt = new BinaryMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName);
+    _registerMarket(address(mkt));
+    emit BinaryCreated(address(mkt), questionId);
+}
+
 }

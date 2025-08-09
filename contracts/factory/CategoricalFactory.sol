@@ -9,8 +9,8 @@ import {FactoryBase} from "./FactoryBase.sol";
 contract CategoricalFactory is FactoryBase {
     event CategoricalCreated(address market, bytes32 questionId);
 
-    constructor(address _owner, address _feeSink, uint256 _defaultRedeemFeeBps)
-        FactoryBase(_owner, _feeSink, _defaultRedeemFeeBps) {}
+    constructor(address _owner, address _feeSink, IERC20 _bondToken, uint256 _creationFee, uint256 _defaultRedeemFeeBps)
+        FactoryBase(_owner, _feeSink, _bondToken, _creationFee, _defaultRedeemFeeBps) {}
 
     function createCategorical(
         IERC20 collateral,
@@ -21,6 +21,23 @@ contract CategoricalFactory is FactoryBase {
         string[] calldata outcomeNames
     ) external onlyOwner returns (CategoricalMarket mkt) {
         mkt = new CategoricalMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName, numOutcomes, outcomeNames);
+        _registerMarket(address(mkt));
         emit CategoricalCreated(address(mkt), questionId);
     }
+
+/// @notice Public user-submitted market creation (requires paying the creation fee in bondToken)
+function submitCategorical(
+    IERC20 collateral,
+    IKasOracle oracle,
+    bytes32 questionId,
+    string calldata marketName,
+    uint8 numOutcomes,
+    string[] calldata outcomeNames
+) external returns (CategoricalMarket mkt) {
+    _collectCreationFee();
+    mkt = new CategoricalMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName, numOutcomes, outcomeNames);
+    _registerMarket(address(mkt));
+    emit CategoricalCreated(address(mkt), questionId);
+}
+
 }

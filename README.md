@@ -173,3 +173,47 @@ Then, create markets (owner-only by default):
   - Reentrancy guards on redemption
 ```
 
+
+
+## User-created Listings & Fees
+
+Users can now create markets directly from the factories by calling:
+- `BinaryFactory.submitBinary(...)`
+- `CategoricalFactory.submitCategorical(...)`
+- `ScalarFactory.submitScalar(...)`
+
+A flat creation fee of **100 BOND_TOKEN** is required for each user-submitted market. The fee is transferred to `FEE_SINK` and the market is registered on-chain.
+
+**Env additions**
+- `BOND_TOKEN` — ERC20 address used for the creation fee (bond token)
+- `CREATION_FEE_UNITS` — (optional) raw units to override. If not provided, the deploy script computes `100 * 10**decimals(BOND_TOKEN)` automatically.
+- `OWNER` — governing wallet (can remove/restore listings via `removeListing/restoreListing`)
+
+### DAO/Governance moderation
+
+The governing wallet (`OWNER`) can **soft-remove** malicious or explicit listings using `removeListing(market, reason)` and later `restoreListing(market)` if needed.
+Frontends should read `isRemoved(market)` from the factory and hide removed markets.
+
+### On-chain registry
+
+Each factory records all created markets:
+- `allMarkets(uint256)`
+- `marketCount()`
+- `isMarket(address)`
+- `isRemoved(address)`
+
+### User-created listing flow
+
+```mermaid
+flowchart TD
+    A[User] -->|approves 100 BOND_TOKEN| B(BOND_TOKEN)
+    A -->|calls submit* on factory| F(Factory)
+    B -->|transferFrom(user → feeSink)| F
+    F -->|deploys| M(New Market)
+    F -->|register| R[Registry: allMarkets[]]
+    F -->|emit *Created| L[Logs/Events]
+    style A fill:#0fa,stroke:#0cf,stroke-width:2px,color:#000
+    style F fill:#eef,stroke:#99f,stroke-width:2px
+    style M fill:#efe,stroke:#9f9,stroke-width:2px
+    style R fill:#ffe,stroke:#cc9,stroke-width:2px
+```
