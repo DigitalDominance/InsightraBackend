@@ -53,30 +53,32 @@ async function deployWithRetry(factory, params, label, provider, deployer, maxRe
       console.log(`[GAS] ${label} gasLimit: ${overrides.gasLimit ? overrides.gasLimit.toString() : "auto"}`);
 
       console.log(`[DEPLOY] sending ${label}...`);
-      const c = await factory.deploy(...params, overrides);
-      // Ensure the transaction hash has a 0x prefix. Some RPCs return hashes
-      // without the prefix, which causes downstream JSON-RPC clients to reject
-      // them. See provider error: "cannot unmarshal hex string without 0x prefix".
-      let txHash = c.deploymentTransaction()?.hash;
+      // Build deployment transaction without immediately broadcasting. We assemble
+      // the transaction using `getDeployTransaction` so that we can send it
+      // manually via the signer. This avoids a Hardhat/Ethers bug where
+      // deployment hashes sometimes omit the 0x prefix and cause JSON-RPC
+      // deserialization errors.
+      const deployTx = await factory.getDeployTransaction(...params, overrides);
+      // Merge any gas overrides into the unsigned transaction. Ethers will
+      // automatically populate fields like nonce and chainId when sending.
+      const unsignedTx = Object.assign({}, deployTx, overrides);
+      const sentTx = await deployer.sendTransaction(unsignedTx);
+      // Normalise the hash with a 0x prefix to satisfy RPCs that expect it.
+      let txHash = sentTx.hash;
       if (txHash && typeof txHash === 'string' && !txHash.startsWith('0x')) {
         txHash = '0x' + txHash;
       }
       console.log(`[DEPLOY] ${label} tx:`, txHash);
-      try {
-        // Wait for deployment normally. If the provider rejects the hash due
-        // to missing 0x, catch and fall back to manual receipt polling.
-        await c.waitForDeployment();
-      } catch (e) {
-        const msg = (e && e.message) ? e.message : String(e);
-        if (msg.includes('cannot unmarshal hex string without 0x prefix') && txHash) {
-          // Fallback: poll for the transaction receipt using the safe hash.
-          await provider.waitForTransaction(txHash);
-        } else {
-          throw e;
-        }
+      // Wait for the transaction to be mined. `wait()` returns a receipt with
+      // the deployed contract address.
+      const receipt = await sentTx.wait();
+      const addr = receipt?.contractAddress;
+      if (!addr) {
+        throw new Error(`Failed to deploy ${label}: contract address not found`);
       }
-      const address = await c.getAddress();
-      console.log(`✅ ${label}:`, address);
+      console.log(`✅ ${label}:`, addr);
+      // Attach the deployed contract instance to the factory for later use.
+      const c = await factory.attach(addr);
       return c;
     } catch (err) {
       const msg = (err && err.message) ? err.message : String(err);
