@@ -1,110 +1,92 @@
 require("dotenv").config();
 const hre = require("hardhat");
 
-async function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function waitForQueue(provider, addr, maxWaitMs = 60000) {
+async function waitForQueue(provider, address, maxWaitMs = 120000) {
   const start = Date.now();
   while (true) {
-    const pending = await provider.getTransactionCount(addr, "pending");
-    const latest  = await provider.getTransactionCount(addr, "latest");
-    const diff = Number(pending - latest);
-    if (diff <= 0) return;
-    if (Date.now() - start > maxWaitMs) {
-      console.log(`[QUEUE] Waited ${maxWaitMs}ms, still ${diff} pending — continuing anyway.`);
+    try {
+      const pending = await provider.getTransactionCount(address, "pending");
+      const latest  = await provider.getTransactionCount(address, "latest");
+      const diff = Number(pending - latest);
+      if (diff <= 0) return;
+      if (Date.now() - start > maxWaitMs) {
+        console.log(`[QUEUE] waited ${maxWaitMs}ms; still ${diff} pending — continuing.`);
+        return;
+      }
+      console.log(`[QUEUE] ${diff} pending tx(s). waiting 4s...`);
+      await sleep(4000);
+    } catch (e) {
+      console.log("[QUEUE] error reading nonce; continuing:", e?.message || String(e));
       return;
     }
-    console.log(`[QUEUE] ${diff} pending tx(s). Waiting 4s...`);
-    await sleep(4000);
   }
 }
 
 async function deployWithRetry(factory, params, label, provider, deployer, maxRetries = 10) {
-  const baseGasPrice = (await provider.getGasPrice?.()) || null;
-  let gasPrice = baseGasPrice;
-  for (let i = 0; i <= maxRetries; i++) {
+  // get base gas price (legacy) if supported
+  let baseGas = null;
+  try { baseGas = await provider.getGasPrice?.(); } catch {}
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       await waitForQueue(provider, await deployer.getAddress(), 120000);
 
-      // bump gas price each retry (legacy type)
-      if (!gasPrice) {
-        gasPrice = (await provider.getGasPrice?.()) || 0n;
-      }
-      const bump = (BigInt(110 + i*15) * gasPrice) / 100n; // +10%, then +25%, etc.
-      const overrides = gasPrice ? { gasPrice: bump } : {};
+      // gas overrides: bump ~+15% per attempt
+      const overrides = {};
+      try {
+        const gp = (await provider.getGasPrice?.()) || baseGas;
+        if (gp) {
+          const bump = (BigInt(115 + attempt * 15) * gp) / 100n;
+          overrides.gasPrice = bump;
+        }
+      } catch {}
 
-      // pre-estimate gas limit (best-effort)
+      // estimate gas limit (best-effort)
       try {
         const tx = await factory.getDeployTransaction(...params, overrides);
         const est = await provider.estimateGas(tx);
-        overrides.gasLimit = (est * 12n) // add 20%
-      } catch (e) {
-        // ignore estimation errors
-      }
+        overrides.gasLimit = (est * 12n) / 10n; // +20%
+      } catch {}
 
-      console.log(`[GAS] ${label} gasPrice wei:`, overrides.gasPrice ? overrides.gasPrice.toString() : "auto");
-      console.log(`[GAS] ${label} gasLimit:`, overrides.gasLimit ? overrides.gasLimit.toString() : "auto");
+      console.log(`[GAS] ${label} gasPrice: ${overrides.gasPrice ? overrides.gasPrice.toString() : "auto"}`);
+      console.log(`[GAS] ${label} gasLimit: ${overrides.gasLimit ? overrides.gasLimit.toString() : "auto"}`);
 
-      console.log(`[DEPLOY] Sending ${label}...`);
+      console.log(`[DEPLOY] sending ${label}...`);
       const c = await factory.deploy(...params, overrides);
       console.log(`[DEPLOY] ${label} tx:`, c.deploymentTransaction()?.hash);
       await c.waitForDeployment();
-      const addr = await c.getAddress();
-      console.log(`✅ ${label}:`, addr);
+      console.log(`✅ ${label}:`, await c.getAddress());
       return c;
     } catch (err) {
       const msg = (err && err.message) ? err.message : String(err);
       const isQueue = /no available queue/i.test(msg);
       console.error(`[DEPLOY ERROR] ${label}:`, msg);
-      if (!isQueue || i === maxRetries) throw err;
-      const backoff = Math.min(60000, 3000 * Math.pow(2, i)); // up to 60s
-      console.log(`[DEPLOY] Retrying ${label} in ${backoff}ms...`);
-      await sleep(backoff);
-      // bump gas for next loop
-      try { gasPrice = (await provider.getGasPrice?.()) || gasPrice; } catch {}
-    }
-  }
-}
-  for (let i = 0; i <= maxRetries; i++) {
-    try {
-      await waitForQueue(provider, await deployer.getAddress(), 90000);
-
-      console.log(`[DEPLOY] Sending ${label}...`);
-      const c = await factory.deploy(...params);
-      console.log(`[DEPLOY] ${label} tx:`, c.deploymentTransaction()?.hash);
-      await c.waitForDeployment();
-      const addr = await c.getAddress();
-      console.log(`✅ ${label}:`, addr);
-      return c;
-    } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      const isQueue = /no available queue/i.test(msg);
-      console.error(`[DEPLOY ERROR] ${label}:`, msg);
-      if (!isQueue || i === maxRetries) throw err;
-      const backoff = 2000 * Math.pow(2, i); // 2s, 4s, 8s, ...
-      console.log(`[DEPLOY] Retrying ${label} in ${backoff}ms...`);
+      if (!isQueue || attempt === maxRetries) throw err;
+      const backoff = Math.min(60000, 3000 * 2 ** attempt);
+      console.log(`[DEPLOY] retrying ${label} in ${backoff}ms...`);
       await sleep(backoff);
     }
   }
 }
 
 async function main() {
-  if (process.env.SKIP_DEPLOY === "true") {
-    console.log("⚡ SKIP_DEPLOY is true — skipping contract deployment");
+  if (String(process.env.SKIP_DEPLOY || "false").toLowerCase() === "true") {
+    console.log("⚡ SKIP_DEPLOY=true — skipping contract deployment");
     return;
   }
 
   const targetNet = process.env.HARDHAT_NETWORK || "kaspaTestnet";
   if (hre.network.name !== targetNet && typeof hre.changeNetwork === "function") {
-    console.log(`[DEPLOY] Switching network: ${hre.network.name} → ${targetNet}`);
+    console.log(`[DEPLOY] switching network: ${hre.network.name} → ${targetNet}`);
     hre.changeNetwork(targetNet);
   } else {
-    console.log(`[DEPLOY] Using network: ${hre.network.name}`);
+    console.log(`[DEPLOY] using network: ${hre.network.name}`);
   }
 
   await hre.run("compile");
   const net = await hre.ethers.provider.getNetwork();
-  console.log('Network:', Number(net.chainId), net.name || '');
+  console.log("Network:", Number(net.chainId), net.name || "");
 
   const [deployer] = await hre.ethers.getSigners();
   const provider = hre.ethers.provider;
