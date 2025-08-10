@@ -5,6 +5,7 @@ import {Ownable2Step} from "../libs/oz/Ownable2Step.sol";
 import {IERC20} from "../libs/oz/IERC20.sol";
 import {SafeERC20} from "../libs/oz/SafeERC20.sol";
 
+/// @notice Base factory providing common fee sinks, registry, and admin controls.
 abstract contract FactoryBase is Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -15,9 +16,11 @@ abstract contract FactoryBase is Ownable2Step {
     IERC20 public immutable bondToken;
 
     /// @notice Flat fee (in bondToken smallest units) for user-submitted markets (e.g., 100 * 10**decimals)
+    /// Kept for ABI compatibility; collection is now handled by the Oracle's createQuestionPublic.
     uint256 public immutable creationFee;
 
-    /// @notice Default redeem fee in basis points, stored into each market upon deployment
+    /// @notice Default redeem fee in basis points, stored into each market upon deployment.
+    /// This used to be nonzero (e.g., 1%). We now enforce 0 so only the Oracle's 2% applies.
     uint256 public defaultRedeemFeeBps;
 
     /// @dev Market registry
@@ -25,10 +28,11 @@ abstract contract FactoryBase is Ownable2Step {
     address[] public allMarkets;
     mapping(address => bool) public isRemoved; // soft-delete flag for listings
 
-    event DefaultRedeemFeeUpdated(uint256 bps);
+    /// @dev Events
     event MarketRegistered(address indexed market);
     event ListingRemoved(address indexed market, string reason);
     event ListingRestored(address indexed market);
+    event DefaultRedeemFeeUpdated(uint256 bps);
 
     constructor(
         address _owner,
@@ -42,14 +46,19 @@ abstract contract FactoryBase is Ownable2Step {
         feeSink = _feeSink;
         bondToken = _bondToken;
         creationFee = _creationFee;
-        defaultRedeemFeeBps = 0; // enforce zero market redeem fee; oracle charges 2% on finalize
+        // Force zero local redeem fee so we don't double-charge. Oracle takes 2% on finalize.
+        defaultRedeemFeeBps = 0;
+        emit DefaultRedeemFeeUpdated(0);
     }
 
-    function setDefaultRedeemFeeBps(uint256 /*bps*/) external onlyOwner { defaultRedeemFeeBps = 0; emit DefaultRedeemFeeUpdated(0); }
+    /// @notice Keep the setter for backward compatibility, but enforce 0.
+    function setDefaultRedeemFeeBps(uint256 /*bps*/) external onlyOwner {
+        defaultRedeemFeeBps = 0;
+        emit DefaultRedeemFeeUpdated(0);
+    }
 
-    /// @dev internal: collect user creation fee (transfers bond token to feeSink)
+    /// @dev internal: collect user creation fee — now a no-op (oracle collects on question creation)
     function _collectCreationFee() internal { /* no-op: oracle collects creation fee */ }
-    }
 
     /// @dev internal: register a newly created market
     function _registerMarket(address market) internal {
