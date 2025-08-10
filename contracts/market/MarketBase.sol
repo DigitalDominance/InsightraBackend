@@ -18,7 +18,7 @@ abstract contract MarketBase is ReentrancyGuard {
     MarketType public immutable marketType;
 
     address public immutable feeSink;
-    uint256 public immutable redeemFeeBps; // e.g., 100 = 1%
+    uint256 public immutable redeemFeeBps; // was previously used for local market redeem fees; now expected to be 0
     uint256 public constant BPS = 10_000;
 
     MarketStatus public status;
@@ -46,7 +46,7 @@ abstract contract MarketBase is ReentrancyGuard {
         require(address(_collateral) != address(0), "collateral=0");
         require(address(_oracle) != address(0), "oracle=0");
         require(_feeSink != address(0), "feeSink=0");
-        require(_redeemFeeBps <= 1000, "fee>10%");
+        require(_redeemFeeBps <= 1000, "fee>10%"); // factories now pass 0; oracle handles 2% fee on payout
 
         collateral = _collateral;
         oracle = _oracle;

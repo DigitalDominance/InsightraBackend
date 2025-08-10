@@ -25,7 +25,7 @@ contract CategoricalFactory is FactoryBase {
         emit CategoricalCreated(address(mkt), questionId);
     }
 
-/// @notice Public user-submitted market creation (requires paying the creation fee in bondToken)
+/// @notice Public user-submitted market creation (no local fee; oracle collects the fee via createQuestionPublic)
 function submitCategorical(
     IERC20 collateral,
     IKasOracle oracle,
@@ -34,7 +34,7 @@ function submitCategorical(
     uint8 numOutcomes,
     string[] calldata outcomeNames
 ) external returns (CategoricalMarket mkt) {
-    _collectCreationFee();
+    // creation fee handled by oracle now (no-op here)
     mkt = new CategoricalMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName, numOutcomes, outcomeNames);
     _registerMarket(address(mkt));
     emit CategoricalCreated(address(mkt), questionId);

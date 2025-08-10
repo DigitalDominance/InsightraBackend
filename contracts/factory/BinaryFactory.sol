@@ -23,14 +23,14 @@ contract BinaryFactory is FactoryBase {
         emit BinaryCreated(address(mkt), questionId);
     }
 
-/// @notice Public user-submitted market creation (requires paying the creation fee in bondToken)
+/// @notice Public user-submitted market creation (no local fee; oracle collects the fee via createQuestionPublic)
 function submitBinary(
     IERC20 collateral,
     IKasOracle oracle,
     bytes32 questionId,
     string calldata marketName
 ) external returns (BinaryMarket mkt) {
-    _collectCreationFee();
+    // creation fee handled by oracle now (no-op here)
     mkt = new BinaryMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName);
     _registerMarket(address(mkt));
     emit BinaryCreated(address(mkt), questionId);

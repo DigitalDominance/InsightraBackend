@@ -26,7 +26,7 @@ contract ScalarFactory is FactoryBase {
         emit ScalarCreated(address(mkt), questionId);
     }
 
-/// @notice Public user-submitted market creation (requires paying the creation fee in bondToken)
+/// @notice Public user-submitted market creation (no local fee; oracle collects the fee via createQuestionPublic)
 function submitScalar(
     IERC20 collateral,
     IKasOracle oracle,
@@ -36,7 +36,7 @@ function submitScalar(
     int256 scalarMax,
     uint32 scalarDecimals
 ) external returns (ScalarMarket mkt) {
-    _collectCreationFee();
+    // creation fee handled by oracle now (no-op here)
     mkt = new ScalarMarket(collateral, oracle, questionId, feeSink, defaultRedeemFeeBps, marketName, scalarMin, scalarMax, scalarDecimals);
     _registerMarket(address(mkt));
     emit ScalarCreated(address(mkt), questionId);

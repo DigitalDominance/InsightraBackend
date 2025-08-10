@@ -42,20 +42,13 @@ abstract contract FactoryBase is Ownable2Step {
         feeSink = _feeSink;
         bondToken = _bondToken;
         creationFee = _creationFee;
-        defaultRedeemFeeBps = _defaultRedeemFeeBps;
+        defaultRedeemFeeBps = 0; // enforce zero market redeem fee; oracle charges 2% on finalize
     }
 
-    function setDefaultRedeemFeeBps(uint256 bps) external onlyOwner {
-        require(bps <= 2_000, "fee too high"); // max 20%
-        defaultRedeemFeeBps = bps;
-        emit DefaultRedeemFeeUpdated(bps);
-    }
+    function setDefaultRedeemFeeBps(uint256 /*bps*/) external onlyOwner { defaultRedeemFeeBps = 0; emit DefaultRedeemFeeUpdated(0); }
 
     /// @dev internal: collect user creation fee (transfers bond token to feeSink)
-    function _collectCreationFee() internal {
-        if (creationFee > 0) {
-            bondToken.safeTransferFrom(msg.sender, feeSink, creationFee);
-        }
+    function _collectCreationFee() internal { /* no-op: oracle collects creation fee */ }
     }
 
     /// @dev internal: register a newly created market
